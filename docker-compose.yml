@@ -1,0 +1,78 @@
+name: sysml-platform
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: sysml
+      POSTGRES_PASSWORD: sysml
+      POSTGRES_DB: sysml
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sysml -d sysml"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Registry + REST execution of analyses (builtin, formula, external)
+  analysis:
+    build: ./services/analysis
+    environment:
+      DATABASE_URL: postgresql://sysml:sysml@postgres:5432/sysml
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8003:8003"
+
+  # Example third-party REST analysis, registered as kind=external (thermalSolver)
+  demo-external:
+    build: ./services/demo-external
+    ports:
+      - "8010:8010"
+
+  # SysML v2 interpreter: OpenMBEE OpenSysML behind a REST API
+  interpreter:
+    build:
+      context: .
+      dockerfile: services/interpreter/Dockerfile
+    environment:
+      ANALYSIS_SERVICE_URL: http://analysis:8003
+    depends_on:
+      - analysis
+    ports:
+      - "8002:8002"
+
+  # Projects, versioned models, interpreted elements (SysML v2 API JSON) and runs
+  model:
+    build:
+      context: .
+      dockerfile: services/model/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://sysml:sysml@postgres:5432/sysml
+      INTERPRETER_SERVICE_URL: http://interpreter:8002
+      ANALYSIS_SERVICE_URL: http://analysis:8003
+      SEED_DEMO: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      interpreter:
+        condition: service_started
+    ports:
+      - "8001:8001"
+
+  # React UI + API gateway (nginx)
+  frontend:
+    build: ./frontend
+    depends_on:
+      - model
+      - interpreter
+      - analysis
+    ports:
+      - "8080:80"
+
+volumes:
+  pgdata:

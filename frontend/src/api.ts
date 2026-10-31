@@ -1,0 +1,81 @@
+import type {
+  Analysis,
+  Invocation,
+  Model,
+  ModelSummary,
+  Preview,
+  Project,
+  Requirement,
+  Run,
+  RunRequest,
+  Version,
+} from "./types";
+
+export class ApiError extends Error {
+  constructor(public status: number, message: string) {
+    super(message);
+  }
+}
+
+async function call<T>(url: string, init?: RequestInit & { json?: unknown }): Promise<T> {
+  const opts: RequestInit = { ...init };
+  if (init?.json !== undefined) {
+    opts.body = JSON.stringify(init.json);
+    opts.headers = { "Content-Type": "application/json", ...(init.headers || {}) };
+  }
+  const res = await fetch(url, opts);
+  if (!res.ok) {
+    let msg = `${res.status} ${res.statusText}`;
+    try {
+      const body = await res.json();
+      const d = body.detail;
+      msg = typeof d === "string" ? d : Array.isArray(d) ? d.map((x: { msg: string }) => x.msg).join("; ") : msg;
+    } catch {
+      /* not json */
+    }
+    throw new ApiError(res.status, msg);
+  }
+  if (res.status === 204) return undefined as T;
+  return res.json();
+}
+
+const M = "/api/models";
+const A = "/api/analysis";
+const I = "/api/interpreter";
+
+export const api = {
+  projects: () => call<Project[]>(`${M}/projects`),
+  createProject: (name: string, description = "") =>
+    call<Project>(`${M}/projects`, { method: "POST", json: { name, description } }),
+  models: (projectId: string) => call<ModelSummary[]>(`${M}/projects/${projectId}/models`),
+  createModel: (projectId: string, name: string, template: "empty" | "vehicle") =>
+    call<Model>(`${M}/projects/${projectId}/models`, { method: "POST", json: { name, template } }),
+  deleteModel: (id: string) => call<void>(`${M}/models/${id}`, { method: "DELETE" }),
+  model: (id: string, version?: number) =>
+    call<Model>(`${M}/models/${id}${version ? `?version=${version}` : ""}`),
+  preview: (id: string, source: string, signal?: AbortSignal) =>
+    call<Preview>(`${M}/models/${id}/preview`, { method: "POST", json: { source }, signal }),
+  save: (id: string, source: string, message: string) =>
+    call<Model>(`${M}/models/${id}/source`, { method: "PUT", json: { source, message } }),
+  versions: (id: string) => call<Version[]>(`${M}/models/${id}/versions`),
+  requirements: (id: string) => call<Requirement[]>(`${M}/models/${id}/requirements`),
+  run: (id: string, req: RunRequest) => call<Run>(`${M}/models/${id}/runs`, { method: "POST", json: req }),
+  runs: (id: string) => call<Run[]>(`${M}/models/${id}/runs`),
+  getRun: (runId: string) => call<Run>(`${M}/runs/${runId}`),
+
+  analyses: () => call<Analysis[]>(`${A}/analyses`),
+  createAnalysis: (a: Partial<Analysis>) => call<Analysis>(`${A}/analyses`, { method: "POST", json: a }),
+  updateAnalysis: (a: Partial<Analysis>) =>
+    call<Analysis>(`${A}/analyses/${a.name}`, { method: "PUT", json: a }),
+  toggleAnalysis: (name: string, enabled: boolean) =>
+    call<Analysis>(`${A}/analyses/${name}?enabled=${enabled}`, { method: "PATCH" }),
+  deleteAnalysis: (name: string) => call<void>(`${A}/analyses/${name}`, { method: "DELETE" }),
+  invoke: (name: string, inputs: Record<string, unknown>) =>
+    call<{ outputs: Record<string, { value: unknown; unit?: string }> }>(`${A}/analyses/${name}/invoke`, {
+      method: "POST",
+      json: { inputs },
+    }),
+  invocations: (limit = 50) => call<Invocation[]>(`${A}/invocations?limit=${limit}`),
+
+  interpreterHealth: () => call<{ status: string; opensysml: string | null }>(`${I}/health`),
+};
