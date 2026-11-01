@@ -349,6 +349,20 @@ class GraphBuilder:
                 rid = _ref(el.get("redefiningFeature"))
                 if rid in self.nodes:
                     self.nodes[rid]["redefines"] = _ref(el.get("redefinedFeature"))
+            elif el.get("@type") == "Subsetting" and not el.get("isImplied"):
+                sid = _ref(el.get("subsettingFeature"))
+                if sid in self.nodes:
+                    self.nodes[sid]["subsets"] = _ref(el.get("subsettedFeature"))
+
+        # Metadata applied to an element (`#Component part def ...`) -> tag names
+        for el in self.elements:
+            if el.get("@type") != "MetadataUsage":
+                continue
+            owner = _ref(el.get("owner"))
+            md = self.by_id.get(_ref(el.get("type")) or "")
+            name = self._name(md) if md else None
+            if owner in self.nodes and name:
+                self.nodes[owner].setdefault("metadata", []).append(name)
 
         nodes = list(self.nodes.values())
         return {"nodes": nodes, "edges": self.edges}

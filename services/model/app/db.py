@@ -72,6 +72,12 @@ CREATE TABLE IF NOT EXISTS models.run (
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS run_model_idx ON models.run (model_id, created_at DESC);
+
+-- Demo projects already seeded once (so a deleted demo is not re-created)
+CREATE TABLE IF NOT EXISTS models.seed (
+    name       TEXT PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 pool = ConnectionPool(DATABASE_URL, kwargs={"row_factory": dict_row, "autocommit": True}, open=False, min_size=1, max_size=10)

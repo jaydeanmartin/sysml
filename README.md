@@ -35,7 +35,10 @@ docker compose up --build
 # open http://localhost:8080
 ```
 
-On first start the model service creates a **Demo / Vehicle** model ([`examples/vehicle.sysml`](examples/vehicle.sysml)). It covers requirements, part and port definitions, connections, instances, an action, a state machine, and calcs/analyses that run over REST.
+On first start the model service creates two demo projects:
+
+- **Demo / Vehicle** ([`examples/vehicle.sysml`](examples/vehicle.sysml)) covers requirements, part and port definitions, connections, instances, an action, a state machine, and calcs/analyses that run over REST.
+- **Product Line** has a component library ([`examples/component_library.sysml`](examples/component_library.sysml)) and system architectures with configured system instances ([`examples/architectures.sysml`](examples/architectures.sysml)).
 
 Things to try in the UI:
 
@@ -44,6 +47,48 @@ Things to try in the UI:
 3. **Requirements tab.** Capture a requirement with the form; the SysML text is inserted for you. **Check all satisfy relations** runs every `satisfy`. `sedan.mass` and `sedan.range` are computed by REST analyses during that check.
 4. **Execute tab.** Run `VehicleModel::sedanCooling`. This analysis case calls the external `thermalSolver` endpoint. The tab lists every REST call made during the run. Running `VehicleModel::Drive` or `VehicleStates` plays back the execution trace in both the diagram and the editor.
 5. **Analyses tab.** Register an external endpoint or a formula. **Insert SysML binding** generates a `calc def` with the `ToolExecution` metadata that binds to it.
+6. **Library tab** (Product Line project). Browse the component types and their catalog instances. **+ New instance** creates an instance from a form with one field per attribute. You can also edit or delete instances and declare new components.
+7. **Configurator tab.** Pick a system architecture and fill each slot with a compatible catalog instance, then create the system instance. **Evaluate & check requirements** computes every system instance's derived attributes and checks each applicable requirement def against it, in one run.
+
+## Component library and system configuration
+
+Everything is plain SysML v2 text in the project's models. The Library and Configurator tabs find components and architectures by two metadata tags, and they edit the text for you:
+
+```sysml
+metadata def Component;
+metadata def SystemArchitecture;
+
+#Component part def Engine {                  // a component: a tagged part def
+    attribute mass : MassValue;
+    port torqueOut : TorquePort;
+}
+abstract #Component part def Transmission { attribute mass : MassValue; }
+#Component part def ManualTransmission :> Transmission { attribute gears : Integer; }
+
+package Catalog {
+    part i4Engine : Engine { attribute :>> mass = 140 [SI::kg]; }   // a component instance
+}
+
+#SystemArchitecture part def CombustionVehicle {    // a system architecture
+    part engine : Engine;                           // slots: part usages typed by part defs
+    part transmission : Transmission;               // accepts instances of any specialization
+    attribute mass : MassValue = engine.mass + transmission.mass + 1150 [SI::kg];
+}
+
+package Configurations {
+    part economy : CombustionVehicle {                 // a system instance
+        part :>> engine :> Catalog::i4Engine;          // each slot subsets a catalog instance,
+        part :>> transmission :> Catalog::manual6;     // so it inherits that instance's values
+    }
+}
+```
+
+- A part def is a component if it, or a part def it specializes, has the `#Component` tag. Architectures work the same way with `#SystemArchitecture`.
+- A component instance is a part usage declared directly in a package and typed by a component. Each system instance is a part usage typed by an architecture.
+- A slot accepts the instances of its type and of every type that specializes it.
+- The catalog is built from a single parse of all the project's models, so the library and the architectures can live in different models. Use the **Component library** and **System architecture** templates when you create a model.
+- Every change saves a new version of the model that declares the element. The service refuses a change that would add an error, for example a value with an unknown unit, or deleting an instance that a system instance still uses.
+- Evaluation is a single `evaluate` run per model. It uses `system.attribute` for each derived attribute and `Requirement(system)` for each requirement def whose subject type the architecture conforms to. A new system instance gets verdicts without any `satisfy` statements.
 
 ## How a model calls REST analyses during execution
 
@@ -98,6 +143,11 @@ Interactive OpenAPI docs are served at `/docs` on each service, e.g. http://loca
 - `GET /models/{id}/requirements`: text, constraints, subject, satisfied-by, latest verdict
 - `POST /models/{id}/runs`: `{"kind": "calc|analysis|requirement|constraint|satisfy|action|state|evaluate|validate", "target", "args", "subject", "expression", "advance"}`
 - `GET /models/{id}/runs`, `GET /runs/{id}` (includes the REST calls made during the run)
+- `GET /projects/{id}/catalog`: components, instances, architectures (slots with compatible instances, applicable requirements), system instances
+- `POST /projects/{id}/catalog/instances` `{"component", "name", "values": {attr: expr}, "doc"?, "package"?, "replace"?}`
+- `POST /projects/{id}/catalog/configurations` `{"architecture", "name", "assignments": {slot: instance}, "doc"?, "package"?, "replace"?}`
+- `POST /projects/{id}/catalog/components` `{"name", "package", "specializes"?, "abstract"?, "attributes": [{name, type}], "ports": [...]}`
+- `DELETE /projects/{id}/catalog/elements?qualifiedName=`
 
 **Interpreter service** (stateless; send the files directly)
 - `POST /parse` `{"files": [{"name", "text"}], "includeElements": false}`
@@ -118,6 +168,7 @@ Interactive OpenAPI docs are served at `/docs` on each service, e.g. http://loca
 | `models.model_version` | The full SysML text of each save, with validity, diagnostics, diagram graph and element count |
 | `models.element` | Each interpreted element as SysML v2 API JSON (`data jsonb`, with a GIN index), plus `metatype`, `qualified_name` and `owner_id` |
 | `models.run` | Execution requests and results: checks, values, trace |
+| `models.seed` | Demo projects already seeded, so a deleted demo is not re-created |
 | `analysis.analysis` | Analysis registry: kind, inputs and outputs with units, endpoint or formulas |
 | `analysis.invocation` | Every analysis call with its inputs, outputs, status, duration and `run_id` |
 

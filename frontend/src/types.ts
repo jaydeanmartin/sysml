@@ -208,3 +208,123 @@ export interface Version {
   size: number;
   createdAt: string;
 }
+
+// ------------------------------------------------------------ component library & configurator
+export type ModelTemplate = "empty" | "vehicle" | "library" | "architecture";
+
+/** Where a catalog element is declared. */
+export interface Located {
+  id: string;
+  name: string;
+  qualifiedName: string;
+  package: string | null;
+  modelId: string | null;
+  modelName: string | null;
+  doc: string | null;
+  loc: Loc | null;
+}
+
+export interface CatalogAttribute {
+  name: string;
+  type: string | null;
+  value: string | null;
+  declaredIn: string | null;
+}
+
+export interface Component extends Located {
+  isAbstract: boolean;
+  specializes: string[];
+  attributes: CatalogAttribute[];
+  ports: { name: string; type: string | null; declaredIn: string | null }[];
+  parts: { name: string; type: string | null; multiplicity: string | null }[];
+  instances: string[];
+}
+
+export interface ComponentInstance extends Located {
+  componentId: string;
+  component: string;
+  /** effective values (component defaults + the instance's own) */
+  values: Record<string, string>;
+  ownValues: Record<string, string>;
+}
+
+export interface Slot {
+  name: string;
+  type: string;
+  typeId: string;
+  multiplicity: string | null;
+  doc: string | null;
+  declaredIn: string | null;
+  /** ids of the instances whose component fits this slot */
+  candidates: string[];
+}
+
+export interface Architecture extends Located {
+  isAbstract: boolean;
+  specializes: string[];
+  slots: Slot[];
+  attributes: CatalogAttribute[];
+  connections: number;
+  /** qualified names of the requirement defs whose subject type this architecture conforms to */
+  requirements: string[];
+}
+
+export interface CatalogRequirement extends Located {
+  subject: string;
+  subjectTypeId: string;
+}
+
+export interface SystemConfiguration extends Located {
+  architectureId: string;
+  architecture: string;
+  /** slot name -> qualified name of the component instance */
+  assignments: Record<string, string | null>;
+}
+
+export interface Catalog {
+  components: Component[];
+  instances: ComponentInstance[];
+  architectures: Architecture[];
+  configurations: SystemConfiguration[];
+  requirements: CatalogRequirement[];
+  packages: { qualifiedName: string; modelId: string | null; modelName: string | null; loc: Loc | null }[];
+  tags: Record<string, string>;
+  diagnostics: Diagnostic[];
+}
+
+export interface CatalogChange {
+  modelId: string;
+  modelName: string;
+  version: number;
+  valid: boolean;
+  qualifiedName: string;
+  text?: string;
+}
+
+export interface InstanceRequest {
+  component: string;
+  name: string;
+  doc?: string;
+  values: Record<string, string>;
+  package?: string | null;
+  replace?: string | null;
+}
+
+export interface ConfigurationRequest {
+  architecture: string;
+  name: string;
+  doc?: string;
+  assignments: Record<string, string | null>;
+  package?: string | null;
+  replace?: string | null;
+}
+
+export interface ComponentRequest {
+  name: string;
+  package: string;
+  specializes?: string | null;
+  abstract?: boolean;
+  doc?: string;
+  attributes: { name: string; type: string }[];
+  ports: { name: string; type: string }[];
+}

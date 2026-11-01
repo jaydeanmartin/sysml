@@ -161,3 +161,29 @@ def test_render_native_view():
     r = client.post("/render", json={"files": files(), "view": "#interconnection:VehicleModel::Vehicle", "form": "mermaid"})
     assert r.status_code == 200
     assert "flowchart" in r.json()["text"]
+
+
+def test_parse_reports_metadata_tags_and_subsetting():
+    root = next(p for p in Path(__file__).resolve().parents if (p / "examples" / "architectures.sysml").exists())
+    fs = [
+        {"name": "ComponentLibrary.sysml", "text": (root / "examples" / "component_library.sysml").read_text()},
+        {"name": "Architectures.sysml", "text": (root / "examples" / "architectures.sysml").read_text()},
+    ]
+    r = client.post("/parse", json={"files": fs}).json()
+    assert r["ok"], r["diagnostics"]
+    nodes = {n["qualifiedName"]: n for n in r["graph"]["nodes"]}
+    assert nodes["ComponentLibrary::Engine"]["metadata"] == ["Component"]
+    assert nodes["Architectures::CombustionVehicle"]["metadata"] == ["SystemArchitecture"]
+    slot = nodes["Architectures::Configurations::economy::engine"]
+    assert nodes["ComponentLibrary::Catalog::i4Engine"]["id"] == slot["subsets"]
+    assert nodes["ComponentLibrary::Catalog::i4Engine"]["loc"]["file"] == "ComponentLibrary.sysml"
+
+
+def test_requirement_def_evaluates_against_a_configured_system():
+    root = next(p for p in Path(__file__).resolve().parents if (p / "examples" / "architectures.sysml").exists())
+    fs = [{"name": f, "text": (root / "examples" / f).read_text()} for f in ("component_library.sysml", "architectures.sysml")]
+    cfg = "Architectures::Configurations::ev60"
+    r = client.post("/execute", json={"files": fs, "kind": "evaluate", "expression": f"{cfg}.mass\nArchitectures::RangeRequirement({cfg})"}).json()
+    values = {c["subject"]: c["values"][0]["value"] for c in r["checks"]}
+    assert values[f"{cfg}.mass"] == "1500 [SI::kg]"
+    assert values[f"Architectures::RangeRequirement({cfg})"] == "false"  # 60 kWh is not enough

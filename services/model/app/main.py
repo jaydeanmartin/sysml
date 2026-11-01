@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import threading
 import time
 import uuid
@@ -24,7 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
-from . import db
+from . import catalog, db
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("model")
@@ -47,6 +48,44 @@ EMPTY_TEMPLATE = """package {name} {{
 }}
 """
 
+LIBRARY_TEMPLATE = """package {name} {{
+    private import ScalarValues::*;
+    private import ISQ::*;
+
+    // The Library and Configurator tabs look for these two metadata tags.
+    metadata def Component {{
+        doc /* A reusable component type. Its instances form the component catalog. */
+    }}
+    metadata def SystemArchitecture {{
+        doc /* A system-level part def. Its part usages are slots that component instances fill. */
+    }}
+
+    #Component part def ExampleComponent {{
+        attribute mass : MassValue;
+    }}
+
+    // Component instances (created from the Library tab)
+    package Catalog {{
+    }}
+}}
+"""
+
+ARCHITECTURE_TEMPLATE = """package {name} {{
+    private import ScalarValues::*;
+    private import ISQ::*;
+{imports}
+    #SystemArchitecture part def System {{
+        doc /* One part usage per slot, typed by a component. */
+    }}
+
+    // System instances (created from the Configurator tab)
+    package Configurations {{
+    }}
+}}
+"""
+_TAG_RE = re.compile(r"\bmetadata\s+def\s+SystemArchitecture\b")
+_TOP_PKG_RE = re.compile(r"^\s*package\s+([A-Za-z_]\w*)", re.M)
+
 
 # ------------------------------------------------------------------ schemas
 class ProjectIn(BaseModel):
@@ -58,7 +97,7 @@ class ModelIn(BaseModel):
     name: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z_][\w\- .]*$")
     description: str = ""
     source: str | None = None
-    template: Literal["empty", "vehicle"] = "empty"
+    template: Literal["empty", "vehicle", "library", "architecture"] = "empty"
 
 
 class SourceIn(BaseModel):
@@ -197,8 +236,8 @@ def _interpret(model: dict[str, Any], source: str, include_elements: bool) -> di
     }
 
 
-def _save_version(model: dict[str, Any], source: str, message: str) -> dict[str, Any]:
-    res = _interpret(model, source, include_elements=True)
+def _save_version(model: dict[str, Any], source: str, message: str, res: dict[str, Any] | None = None) -> dict[str, Any]:
+    res = res or _interpret(model, source, include_elements=True)
     diagnostics, graph, elements, valid = res["diagnostics"], res["graph"], res["elements"], res["valid"]
     with db.pool.connection() as c, c.transaction():
         m = c.execute("SELECT head_version FROM models.model WHERE id=%s FOR UPDATE", (model["id"],)).fetchone()
@@ -236,29 +275,59 @@ def _save_version(model: dict[str, Any], source: str, message: str) -> dict[str,
 
 
 # ------------------------------------------------------------------ app
+# (seed key, project, description, [(model, example file, description)]); models
+# are saved in this order, so a model can import the packages of the ones before it
+DEMOS = [
+    (
+        "demo", "Demo", "Example vehicle model calling REST analyses during execution",
+        [("Vehicle", "vehicle.sysml", "Vehicle architecture, requirements, behavior and analyses")],
+    ),
+    (
+        "product-line", "Product Line", "Component library, system architectures and configured system instances",
+        [
+            ("ComponentLibrary", "component_library.sysml", "Component types (#Component part defs) and their catalog instances"),
+            ("Architectures", "architectures.sysml", "System architectures (#SystemArchitecture) and the system instances configured from the catalog"),
+        ],
+    ),
+]
+
+
 def _seed_demo() -> None:
-    example = EXAMPLES_DIR / "vehicle.sysml"
     with db.pool.connection() as c:
-        if c.execute("SELECT 1 FROM models.project LIMIT 1").fetchone() or not example.exists():
-            return
-        pid = c.execute(
-            "INSERT INTO models.project (name, description) VALUES (%s,%s) ON CONFLICT (name) DO NOTHING RETURNING id",
-            ("Demo", "Example vehicle model calling REST analyses during execution"),
-        ).fetchone()
-        if not pid:
-            return
-        m = c.execute(
-            "INSERT INTO models.model (project_id, name, description) VALUES (%s,%s,%s) RETURNING *",
-            (pid["id"], "Vehicle", "Vehicle architecture, requirements, behavior and analyses"),
-        ).fetchone()
-    for attempt in range(60):  # the interpreter may still be starting
-        try:
-            _save_version(m, example.read_text(), "Seed example")
-            log.info("seeded demo project")
-            return
-        except HTTPException as exc:
-            log.info("waiting for interpreter to seed demo (%s)", exc.detail)
-            time.sleep(2)
+        if not c.execute("SELECT 1 FROM models.seed LIMIT 1").fetchone() and c.execute("SELECT 1 FROM models.project LIMIT 1").fetchone():
+            # a database from before seeds were recorded: it already had its chance at the first demo
+            c.execute("INSERT INTO models.seed (name) VALUES ('demo') ON CONFLICT DO NOTHING")
+    for key, project, description, models in DEMOS:
+        if not all((EXAMPLES_DIR / f).exists() for _, f, _ in models):
+            continue
+        with db.pool.connection() as c, c.transaction():
+            if not c.execute("INSERT INTO models.seed (name) VALUES (%s) ON CONFLICT DO NOTHING RETURNING name", (key,)).fetchone():
+                continue  # seeded before (and maybe deleted since), or another worker is seeding it
+            pid = c.execute(
+                "INSERT INTO models.project (name, description) VALUES (%s,%s) ON CONFLICT (name) DO NOTHING RETURNING id",
+                (project, description),
+            ).fetchone()
+            if not pid:
+                continue
+            rows = [
+                (
+                    c.execute(
+                        "INSERT INTO models.model (project_id, name, description) VALUES (%s,%s,%s) RETURNING *",
+                        (pid["id"], name, desc),
+                    ).fetchone(),
+                    (EXAMPLES_DIR / f).read_text(),
+                )
+                for name, f, desc in models
+            ]
+        for m, text in rows:
+            for attempt in range(60):  # the interpreter may still be starting
+                try:
+                    _save_version(m, text, "Seed example")
+                    break
+                except HTTPException as exc:
+                    log.info("waiting for interpreter to seed %s (%s)", project, exc.detail)
+                    time.sleep(2)
+        log.info("seeded demo project %s", project)
 
 
 @asynccontextmanager
@@ -332,6 +401,21 @@ def list_models(project_id: uuid.UUID) -> list[dict[str, Any]]:
     return [_model_api(r, r if r["valid"] is not None else None, full=False) for r in rows]
 
 
+def _library_imports(project_id: uuid.UUID) -> str:
+    """Imports of the project's packages that declare the #SystemArchitecture tag."""
+    with db.pool.connection() as c:
+        rows = c.execute(
+            """SELECT v.source FROM models.model m
+               JOIN models.model_version v ON v.model_id=m.id AND v.version=m.head_version
+               WHERE m.project_id=%s ORDER BY m.name""",
+            (project_id,),
+        ).fetchall()
+    pkgs = [m.group(1) for r in rows if _TAG_RE.search(r["source"]) for m in [_TOP_PKG_RE.search(r["source"])] if m]
+    if not pkgs:
+        return "    // No component library in this project yet: create one from the 'Component library' template.\n"
+    return "".join(f"    private import {p}::*;\n" for p in dict.fromkeys(pkgs))
+
+
 @app.post("/projects/{project_id}/models", status_code=201)
 def create_model(project_id: uuid.UUID, body: ModelIn) -> dict[str, Any]:
     pkg = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in body.name)
@@ -341,6 +425,13 @@ def create_model(project_id: uuid.UUID, body: ModelIn) -> dict[str, Any]:
         if body.template == "vehicle" and example.exists():
             # rename the package so it does not clash with other models of the project
             source = example.read_text().replace("package VehicleModel {", f"package {pkg} {{", 1)
+        elif body.template == "library":
+            source = LIBRARY_TEMPLATE.format(name=pkg)
+        elif body.template == "architecture":
+            imports = _library_imports(project_id)
+            source = ARCHITECTURE_TEMPLATE.format(name=pkg, imports=imports)
+            if "import" not in imports:  # nothing declares the tag yet
+                source = source.replace("#SystemArchitecture part def", "part def")
         else:
             source = EMPTY_TEMPLATE.format(name=pkg)
     with db.pool.connection() as c:
@@ -560,3 +651,218 @@ def get_run(run_id: uuid.UUID) -> dict[str, Any]:
     out = _run_api(r)
     out["invocations"] = _invocations(str(run_id))
     return out
+
+
+# ------------------------------------------------------------------ component library & configurator
+class FeatureIn(BaseModel):
+    name: str
+    type: str = ""
+
+
+class ComponentIn(BaseModel):
+    name: str
+    package: str = Field(description="qualified name of the package to declare the component in")
+    specializes: str | None = None
+    abstract: bool = False
+    doc: str = ""
+    attributes: list[FeatureIn] = []
+    ports: list[FeatureIn] = []
+
+
+class InstanceIn(BaseModel):
+    component: str = Field(description="qualified name of the component part def")
+    name: str
+    doc: str = ""
+    values: dict[str, str] = Field(default={}, description="attribute name -> SysML expression, e.g. '140 [SI::kg]'")
+    package: str | None = Field(None, description="default: the Catalog package next to the component")
+    replace: str | None = Field(None, description="qualified name of an existing instance to rewrite")
+
+
+class ConfigurationIn(BaseModel):
+    architecture: str = Field(description="qualified name of the #SystemArchitecture part def")
+    name: str
+    doc: str = ""
+    assignments: dict[str, str | None] = Field(default={}, description="slot name -> qualified name of a component instance")
+    package: str | None = Field(None, description="default: the Configurations package next to the architecture")
+    replace: str | None = Field(None, description="qualified name of an existing system instance to rewrite")
+
+
+def _project_heads(project_id: uuid.UUID) -> list[dict[str, Any]]:
+    with db.pool.connection() as c:
+        if not c.execute("SELECT 1 FROM models.project WHERE id=%s", (project_id,)).fetchone():
+            raise HTTPException(404, "project not found")
+        return c.execute(
+            """SELECT m.id, m.name, v.source FROM models.model m
+               JOIN models.model_version v ON v.model_id=m.id AND v.version=m.head_version
+               WHERE m.project_id=%s ORDER BY m.name""",
+            (project_id,),
+        ).fetchall()
+
+
+def _project_catalog(project_id: uuid.UUID) -> tuple[dict[str, Any], dict[str, str]]:
+    """Catalog of a project from one parse of all its models (head versions).
+    Also returns {model id -> head source}."""
+    rows = _project_heads(project_id)
+    sources = {str(r["id"]): r["source"] for r in rows}
+    if not rows:
+        return catalog.build({"nodes": [], "edges": []}, {}) | {"diagnostics": []}, sources
+    files = [{"name": f"{r['name']}.sysml", "text": r["source"]} for r in rows]
+    parsed = _interpreter("/parse", {"files": files})
+    file_models = {f"{r['name']}.sysml": {"id": str(r["id"]), "name": r["name"]} for r in rows}
+    cat = catalog.build(parsed["graph"], file_models)
+    cat["diagnostics"] = [d for d in parsed["diagnostics"] if d["severity"] == "error"]
+    return cat, sources
+
+
+def _find(items: list[dict[str, Any]], qn: str | None, what: str) -> dict[str, Any]:
+    item = next((i for i in items if i["qualifiedName"] == qn), None)
+    if not item:
+        raise HTTPException(404, f"{what} '{qn}' not found")
+    return item
+
+
+def _package(cat: dict[str, Any], qn: str) -> dict[str, Any]:
+    pkg = next((p for p in cat["packages"] if p["qualifiedName"] == qn), None)
+    if not pkg or not pkg["modelId"] or not pkg["loc"]:
+        raise HTTPException(404, f"package '{qn}' not found")
+    return pkg
+
+
+def _default_package(cat: dict[str, Any], near: dict[str, Any], name: str) -> str:
+    """A package called ``name`` in the same model (nearest to ``near``), else ``near``'s own package."""
+    pkgs = [p["qualifiedName"] for p in cat["packages"] if p["modelId"] == near["modelId"] and p["qualifiedName"].rsplit("::", 1)[-1] == name]
+    root = near["qualifiedName"].split("::", 1)[0]
+    pkgs.sort(key=lambda q: (not q.startswith(root + "::"), q.count("::")))
+    return pkgs[0] if pkgs else near["package"]
+
+
+def _all_qns(cat: dict[str, Any]) -> set[str]:
+    out = {p["qualifiedName"] for p in cat["packages"]}
+    for key in ("components", "instances", "architectures", "configurations"):
+        out |= {i["qualifiedName"] for i in cat[key]}
+    return out
+
+
+def _commit(model_id: str, source: str, message: str) -> dict[str, Any]:
+    """Save edited model text, refusing an edit that adds errors (in this model
+    or in a model that refers to it)."""
+    m = _model_row(model_id)
+    head = _head(model_id)
+    before = sum(1 for d in (head["diagnostics"] if head else []) if d["severity"] == "error")
+    res = _interpret(m, source, include_elements=True)
+    errors = [d for d in res["diagnostics"] if d["severity"] == "error"]
+    if len(errors) > before:
+        detail = "; ".join(f"line {d['line']}: {d['message']}" for d in errors[:3])
+        raise HTTPException(422, f"The change would make '{m['name']}' invalid, so it was not saved. {detail}")
+    v = _save_version(m, source, message, res)
+    return {"modelId": model_id, "modelName": m["name"], "version": v["version"], "valid": v["valid"]}
+
+
+def _place(cat: dict[str, Any], sources: dict[str, str], name: str, package: str, replace: dict[str, Any] | None):
+    """(model id, package qualified name, function block -> new source) for an insert or rewrite."""
+    if replace:
+        model_id, pkg_qn = replace["modelId"], replace["package"]
+        new_qn = f"{pkg_qn}::{name}"
+        if new_qn != replace["qualifiedName"] and new_qn in _all_qns(cat):
+            raise HTTPException(409, f"'{new_qn}' already exists")
+        return model_id, pkg_qn, lambda block: catalog.replace_element(sources[model_id], replace["loc"], block)
+    pkg = _package(cat, package)
+    if f"{package}::{name}" in _all_qns(cat):
+        raise HTTPException(409, f"'{package}::{name}' already exists")
+    model_id = pkg["modelId"]
+    return model_id, package, lambda block: catalog.insert_member(sources[model_id], pkg["loc"], block)
+
+
+@app.get("/projects/{project_id}/catalog")
+def get_catalog(project_id: uuid.UUID) -> dict[str, Any]:
+    """Component types, their instances, system architectures (with slots and the
+    instances each slot accepts) and configured system instances of a project."""
+    return _project_catalog(project_id)[0]
+
+
+@app.post("/projects/{project_id}/catalog/components", status_code=201)
+def create_component(project_id: uuid.UUID, body: ComponentIn) -> dict[str, Any]:
+    """Declare a new ``#Component part def``."""
+    cat, sources = _project_catalog(project_id)
+    tag = cat["tags"].get(catalog.COMPONENT_TAG)
+    if not tag:
+        raise HTTPException(409, "No 'metadata def Component' in this project: create a model from the component library template first")
+    model_id, pkg_qn, apply = _place(cat, sources, body.name, body.package, None)
+    try:
+        block = catalog.component_text(
+            body.name, catalog.ref(tag, pkg_qn), body.specializes, [f.model_dump() for f in body.attributes],
+            [f.model_dump() for f in body.ports], body.doc, body.abstract,
+        )
+        source = apply(block)
+    except catalog.CatalogError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return _commit(model_id, source, f"Add component {body.name}") | {"qualifiedName": f"{pkg_qn}::{body.name}", "text": "\n".join(block)}
+
+
+@app.post("/projects/{project_id}/catalog/instances", status_code=201)
+def save_instance(project_id: uuid.UUID, body: InstanceIn) -> dict[str, Any]:
+    """Create (or, with ``replace``, rewrite) a component instance in the catalog."""
+    cat, sources = _project_catalog(project_id)
+    comp = _find(cat["components"], body.component, "component")
+    if comp["isAbstract"]:
+        raise HTTPException(422, f"'{comp['name']}' is abstract: instantiate one of its specializations")
+    attrs = {a["name"] for a in comp["attributes"]}
+    unknown = set(body.values) - attrs
+    if unknown:
+        raise HTTPException(422, f"{comp['name']} has no attribute {', '.join(sorted(unknown))}")
+    replace = _find(cat["instances"], body.replace, "instance") if body.replace else None
+    package = body.package or _default_package(cat, comp, "Catalog")
+    model_id, pkg_qn, apply = _place(cat, sources, body.name, package, replace)
+    try:
+        block = catalog.instance_text(body.name, catalog.ref(comp["qualifiedName"], pkg_qn), body.values, body.doc)
+        source = apply(block)
+    except catalog.CatalogError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    verb = "Update" if replace else "Add"
+    return _commit(model_id, source, f"{verb} instance {body.name} : {comp['name']}") | {
+        "qualifiedName": f"{pkg_qn}::{body.name}", "text": "\n".join(block),
+    }
+
+
+@app.post("/projects/{project_id}/catalog/configurations", status_code=201)
+def save_configuration(project_id: uuid.UUID, body: ConfigurationIn) -> dict[str, Any]:
+    """Create (or rewrite) a system instance: an architecture whose slots are
+    filled with component instances from the catalog."""
+    cat, sources = _project_catalog(project_id)
+    arch = _find(cat["architectures"], body.architecture, "architecture")
+    slots = {s["name"]: s for s in arch["slots"]}
+    inst_by_qn = {i["qualifiedName"]: i for i in cat["instances"]}
+    for slot, inst_qn in body.assignments.items():
+        if slot not in slots:
+            raise HTTPException(422, f"{arch['name']} has no slot '{slot}'")
+        if not inst_qn:
+            continue
+        inst = inst_by_qn.get(inst_qn)
+        if not inst:
+            raise HTTPException(404, f"instance '{inst_qn}' not found")
+        if inst["id"] not in slots[slot]["candidates"]:
+            raise HTTPException(422, f"'{inst['name']}' is a {inst['component']}, which does not fit slot {slot} : {slots[slot]['type']}")
+    replace = _find(cat["configurations"], body.replace, "system instance") if body.replace else None
+    package = body.package or _default_package(cat, arch, "Configurations")
+    model_id, pkg_qn, apply = _place(cat, sources, body.name, package, replace)
+    ordered = {s: catalog.ref(body.assignments[s], pkg_qn) for s in slots if body.assignments.get(s)}
+    try:
+        block = catalog.configuration_text(body.name, catalog.ref(arch["qualifiedName"], pkg_qn), ordered, body.doc)
+        source = apply(block)
+    except catalog.CatalogError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    verb = "Update" if replace else "Configure"
+    return _commit(model_id, source, f"{verb} system {body.name} : {arch['name']}") | {
+        "qualifiedName": f"{pkg_qn}::{body.name}", "text": "\n".join(block),
+    }
+
+
+@app.delete("/projects/{project_id}/catalog/elements")
+def delete_catalog_element(project_id: uuid.UUID, qualifiedName: str) -> dict[str, Any]:
+    """Remove a component, instance or system instance from its model's text.
+    Refused while something else still refers to it."""
+    cat, sources = _project_catalog(project_id)
+    items = cat["components"] + cat["instances"] + cat["configurations"]
+    item = _find(items, qualifiedName, "element")
+    source = catalog.remove_element(sources[item["modelId"]], item["loc"])
+    return _commit(item["modelId"], source, f"Remove {item['name']}") | {"qualifiedName": qualifiedName}

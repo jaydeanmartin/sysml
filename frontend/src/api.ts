@@ -1,5 +1,11 @@
 import type {
   Analysis,
+  Catalog,
+  CatalogChange,
+  ComponentRequest,
+  ConfigurationRequest,
+  InstanceRequest,
+  ModelTemplate,
   Invocation,
   Model,
   ModelSummary,
@@ -48,7 +54,7 @@ export const api = {
   createProject: (name: string, description = "") =>
     call<Project>(`${M}/projects`, { method: "POST", json: { name, description } }),
   models: (projectId: string) => call<ModelSummary[]>(`${M}/projects/${projectId}/models`),
-  createModel: (projectId: string, name: string, template: "empty" | "vehicle") =>
+  createModel: (projectId: string, name: string, template: ModelTemplate) =>
     call<Model>(`${M}/projects/${projectId}/models`, { method: "POST", json: { name, template } }),
   deleteModel: (id: string) => call<void>(`${M}/models/${id}`, { method: "DELETE" }),
   model: (id: string, version?: number) =>
@@ -62,6 +68,18 @@ export const api = {
   run: (id: string, req: RunRequest) => call<Run>(`${M}/models/${id}/runs`, { method: "POST", json: req }),
   runs: (id: string) => call<Run[]>(`${M}/models/${id}/runs`),
   getRun: (runId: string) => call<Run>(`${M}/runs/${runId}`),
+
+  catalog: (projectId: string) => call<Catalog>(`${M}/projects/${projectId}/catalog`),
+  createComponent: (projectId: string, req: ComponentRequest) =>
+    call<CatalogChange>(`${M}/projects/${projectId}/catalog/components`, { method: "POST", json: req }),
+  saveInstance: (projectId: string, req: InstanceRequest) =>
+    call<CatalogChange>(`${M}/projects/${projectId}/catalog/instances`, { method: "POST", json: req }),
+  saveConfiguration: (projectId: string, req: ConfigurationRequest) =>
+    call<CatalogChange>(`${M}/projects/${projectId}/catalog/configurations`, { method: "POST", json: req }),
+  deleteCatalogElement: (projectId: string, qualifiedName: string) =>
+    call<CatalogChange>(`${M}/projects/${projectId}/catalog/elements?qualifiedName=${encodeURIComponent(qualifiedName)}`, {
+      method: "DELETE",
+    }),
 
   analyses: () => call<Analysis[]>(`${A}/analyses`),
   createAnalysis: (a: Partial<Analysis>) => call<Analysis>(`${A}/analyses`, { method: "POST", json: a }),

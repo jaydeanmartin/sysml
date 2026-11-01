@@ -12,13 +12,16 @@ import {
   type ViewKind,
 } from "./diagram/model";
 import { AnalysesPanel } from "./panels/AnalysesPanel";
+import { ConfiguratorPanel } from "./panels/ConfiguratorPanel";
 import { ExecutePanel } from "./panels/ExecutePanel";
 import { HistoryPanel } from "./panels/HistoryPanel";
+import { LibraryPanel } from "./panels/LibraryPanel";
 import { RequirementsPanel } from "./panels/RequirementsPanel";
 import { SNIPPETS } from "./snippets";
-import type { Diagnostic, GNode, Graph, Loc, Model, ModelSummary, Project, Run, RunRequest } from "./types";
+import type { Catalog, CatalogChange, Diagnostic, GNode, Graph, Loc, Located, Model, ModelSummary, ModelTemplate, Project, Run, RunRequest } from "./types";
 
-type Tab = "diagram" | "requirements" | "execute" | "analyses" | "history";
+type Tab = "diagram" | "library" | "configurator" | "requirements" | "execute" | "analyses" | "history";
+const CATALOG_TABS: Tab[] = ["library", "configurator"];
 const EMPTY: Graph = { nodes: [], edges: [] };
 
 export default function App() {
@@ -45,9 +48,14 @@ export default function App() {
   const [toast, setToast] = useState<{ text: string; bad?: boolean } | null>(null);
   const [engine, setEngine] = useState<string | null>(null);
   const [leftPct, setLeftPct] = useState(42);
-  const [newModel, setNewModel] = useState<{ name: string; template: "empty" | "vehicle" } | null>(null);
+  const [newModel, setNewModel] = useState<{ name: string; template: ModelTemplate } | null>(null);
+  const [catalog, setCatalog] = useState<Catalog | null>(null);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [catalogTick, setCatalogTick] = useState(0);
   const editor = useRef<EditorHandle>(null);
   const abort = useRef<AbortController | null>(null);
+  const pendingReveal = useRef<{ modelId: string; loc: Loc; id: string } | null>(null);
 
   const dirty = !!saved && source !== saved.source;
   const errors = diagnostics.filter((d) => d.severity === "error");
@@ -85,6 +93,12 @@ export default function App() {
     setActive(new Set());
     setLastRun(null);
     setIbdContext(defaultContext(m.graph));
+    const reveal = pendingReveal.current;
+    if (reveal?.modelId === id) {
+      pendingReveal.current = null;
+      setSelected(reveal.id);
+      window.setTimeout(() => editor.current?.reveal(reveal.loc), 30);
+    }
     const reqs = await api.requirements(id).catch(() => []);
     const v: Record<string, string> = {};
     for (const r of reqs) if (r.verdict) v[r.qualifiedName] = r.verdict.status;
@@ -122,6 +136,31 @@ export default function App() {
     }, 550);
     return () => window.clearTimeout(t);
   }, [source, modelId, saved]);
+
+  // ---------------------------------------------------------- component library / configurator
+  const catalogTab = CATALOG_TABS.includes(tab);
+  useEffect(() => {
+    setCatalog(null);
+  }, [projectId]);
+  useEffect(() => {
+    if (!projectId || !catalogTab) return;
+    let stale = false;
+    setCatalogLoading(true);
+    api
+      .catalog(projectId)
+      .then(
+        (c) => {
+          if (stale) return;
+          setCatalog(c);
+          setCatalogError(null);
+        },
+        (e) => !stale && setCatalogError((e as Error).message)
+      )
+      .finally(() => !stale && setCatalogLoading(false));
+    return () => {
+      stale = true;
+    };
+  }, [projectId, catalogTab, catalogTick, saved?.headVersion]);
 
   useEffect(() => {
     if (ibdContext && !nodesById.has(ibdContext)) setIbdContext(defaultContext(graph));
@@ -176,6 +215,39 @@ export default function App() {
     },
     [modelId, dirty, save, verdicts, graph]
   );
+
+  const ensureSaved = useCallback(async () => !dirty || !!(await save()), [dirty, save]);
+
+  /** Apply a catalog change (it saves a new version of some model of the project). */
+  const changeCatalog = useCallback(
+    async (fn: () => Promise<CatalogChange>): Promise<CatalogChange | null> => {
+      if (!(await ensureSaved())) return null;
+      try {
+        const r = await fn();
+        flash(`Saved ${r.modelName} v${r.version}: ${r.qualifiedName}`);
+        if (r.modelId === modelId) await loadModel(r.modelId); // its new head version also refreshes the catalog
+        else setCatalogTick((t) => t + 1);
+        return r;
+      } catch (e) {
+        flash((e as Error).message, true);
+        return null;
+      }
+    },
+    [ensureSaved, modelId, loadModel]
+  );
+
+  /** Show a catalog element's text in the editor, switching models if needed. */
+  const openElement = async (el: Located) => {
+    if (!el.modelId || !el.loc) return;
+    if (el.modelId === modelId) {
+      select(el.id, false);
+      editor.current?.reveal(el.loc);
+      return;
+    }
+    if (!(await ensureSaved())) return;
+    pendingReveal.current = { modelId: el.modelId, loc: el.loc, id: el.id };
+    setModelId(el.modelId);
+  };
 
   const select = (id: string | null, reveal = true) => {
     setSelected(id);
@@ -343,6 +415,8 @@ export default function App() {
             {(
               [
                 ["diagram", "Diagram"],
+                ["library", "Library"],
+                ["configurator", "Configurator"],
                 ["requirements", "Requirements"],
                 ["execute", "Execute"],
                 ["analyses", "Analyses"],
@@ -424,6 +498,15 @@ export default function App() {
               }}
             />
           )}
+          {catalogTab && projectId && (
+            <>
+              {tab === "library" ? (
+                <LibraryPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
+              ) : (
+                <ConfiguratorPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
+              )}
+            </>
+          )}
           {tab === "analyses" && <AnalysesPanel onInsert={(t) => insert(t)} />}
           {tab === "history" && modelId && (
             <HistoryPanel
@@ -462,8 +545,10 @@ export default function App() {
             </label>
             <label>
               Start from
-              <select value={newModel.template} onChange={(e) => setNewModel({ ...newModel, template: e.target.value as "empty" | "vehicle" })}>
+              <select value={newModel.template} onChange={(e) => setNewModel({ ...newModel, template: e.target.value as ModelTemplate })}>
                 <option value="empty">Empty package</option>
+                <option value="library">Component library</option>
+                <option value="architecture">System architecture</option>
                 <option value="vehicle">Vehicle example</option>
               </select>
             </label>
