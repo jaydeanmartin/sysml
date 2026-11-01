@@ -1,13 +1,15 @@
-"""Model service: projects, versioned SysML v2 models, interpreted elements and runs.
+"""Model service: projects, versioned SysML v2 models, their interpretation and runs.
 
-The SysML v2 text is the source of truth. Each save creates an immutable
-version; the interpreter service validates it and returns the model as SysML v2
-API JSON elements (stored one row per element, queryable with JSONB) and a
-diagram graph. Executions are proxied to the interpreter and recorded.
+The SysML v2 text is the source of truth. Models are stored in a SysML v2 API server
+(the OMG Systems Modeling API & Services, see store.py): a project is an API project,
+each save is a commit carrying the model's text and its interpreted elements (only what
+changed). The interpreter service validates the text and returns the elements and a
+diagram graph. Executions are proxied to the interpreter and recorded in PostgreSQL.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -16,24 +18,28 @@ import threading
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
-from . import catalog, db
+from . import catalog, db, legacy, store
 
 logging.basicConfig(level=logging.INFO)
+logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per SysML v2 API request otherwise
 log = logging.getLogger("model")
 
 INTERPRETER_URL = os.environ.get("INTERPRETER_SERVICE_URL", "http://interpreter:8002")
 ANALYSIS_URL = os.environ.get("ANALYSIS_SERVICE_URL", "http://analysis:8003")
 EXAMPLES_DIR = Path(os.environ.get("EXAMPLES_DIR", "/app/examples"))
 SEED_DEMO = os.environ.get("SEED_DEMO", "true").lower() == "true"
+MIGRATE_LEGACY = os.environ.get("MIGRATE_LEGACY", "true").lower() == "true"
 
 EMPTY_TEMPLATE = """package {name} {{
     private import ScalarValues::*;
@@ -132,74 +138,133 @@ def _interpreter(path: str, body: dict[str, Any], timeout: float = 180) -> dict[
     return r.json()
 
 
+_model_project: dict[str, str] = {}  # model id -> project id (models live inside their project)
+_payloads: dict[str, tuple[str, dict[str, Any]]] = {}  # model id -> (commit, payloads last committed)
+_derived = store.LRU(256)  # interpretation results by the texts they were made from
+
+
+def _state(project_id: str) -> tuple[str | None, store.Snapshot, list[store.Commit]]:
+    """Head commit, models and history of a project (404 if there is no such project)."""
+    try:
+        if project_id in db.deleted_projects():
+            raise KeyError(project_id)
+        head = store.head(project_id)
+    except KeyError:
+        raise HTTPException(404, "project not found") from None
+    snap = store.snapshot(project_id, head)
+    for mid in snap.models:
+        _model_project[mid] = project_id
+    return head, snap, store.history(project_id, head)
+
+
+def _versions(hist: list[store.Commit], model_id: str) -> list[store.Commit]:
+    """The commits that saved this model, oldest first (its versions 1..n)."""
+    out: list[store.Commit] = []
+    for c in hist:
+        if c.model_id == model_id:
+            out = [] if "Deleted" in c.trailers else [*out, c]
+    return out
+
+
+def _model(project_id: str, sm: store.StoredModel, head: str | None, snap: store.Snapshot, hist: list[store.Commit]) -> dict[str, Any]:
+    commits = _versions(hist, sm.id) or [c for c in hist[-1:]]  # written by another API client: one version
+    return {
+        "id": sm.id, "project_id": project_id, "name": sm.name, "description": sm.description,
+        "head_version": len(commits), "commits": commits, "head": head, "snapshot": snap,
+    }
+
+
 def _model_row(model_id: str) -> dict[str, Any]:
     try:
         uuid.UUID(model_id)
     except ValueError as exc:
         raise HTTPException(404, "model not found") from exc
-    with db.pool.connection() as c:
-        row = c.execute("SELECT * FROM models.model WHERE id=%s", (model_id,)).fetchone()
-    if not row:
-        raise HTTPException(404, "model not found")
-    return row
+    known = _model_project.get(model_id)
+    candidates = [known] if known else []
+    for pid in candidates + [p["@id"] for p in _projects() if p["@id"] != known]:
+        try:
+            head, snap, hist = _state(pid)
+        except HTTPException:
+            continue
+        if model_id in snap.models:
+            return _model(pid, snap.models[model_id], head, snap, hist)
+        if pid == known:
+            _model_project.pop(model_id, None)
+    raise HTTPException(404, "model not found")
 
 
-def _head(model_id: str, version: int | None = None) -> dict[str, Any] | None:
-    with db.pool.connection() as c:
-        if version is None:
-            return c.execute(
-                """SELECT v.* FROM models.model_version v JOIN models.model m ON m.id=v.model_id
-                   WHERE v.model_id=%s AND v.version=m.head_version""",
-                (model_id,),
-            ).fetchone()
-        return c.execute(
-            "SELECT * FROM models.model_version WHERE model_id=%s AND version=%s", (model_id, version)
-        ).fetchone()
+def _valid(c: store.Commit) -> bool:
+    return c.trailers.get("Valid", "true") == "true"
 
 
-def _context_files(model: dict[str, Any], source: str) -> list[dict[str, str]]:
-    """The model's text plus every other model of the project (head versions),
-    so packages in one model can import packages from another."""
-    files = [{"name": f"{model['name']}.sysml", "text": source}]
-    with db.pool.connection() as c:
-        rows = c.execute(
-            """SELECT m.name, v.source FROM models.model m
-               JOIN models.model_version v ON v.model_id=m.id AND v.version=m.head_version
-               WHERE m.project_id=%s AND m.id<>%s ORDER BY m.name""",
-            (model["project_id"], model["id"]),
-        ).fetchall()
-    files += [{"name": f"{r['name']}.sysml", "text": r["source"]} for r in rows]
-    return files
+def _version(m: dict[str, Any], version: int | None = None) -> dict[str, Any] | None:
+    """A version of the model: its text and the commit that saved it (default: the head)."""
+    commits = m["commits"]
+    n = version or len(commits)
+    if not 1 <= n <= len(commits):
+        return None
+    c = commits[n - 1]
+    latest = n == len(commits)
+    # the head version is read in the project's current state, older ones as they were committed
+    snap = m["snapshot"] if latest else store.snapshot(m["project_id"], c.id)
+    sm = snap.models.get(m["id"])
+    if not sm:
+        return None
+    return {
+        "version": n, "commit": c, "source": sm.source, "message": c.message, "valid": _valid(c),
+        "element_count": int(c.trailers.get("Elements") or 0), "created_at": store.created(c),
+        "files": _files(snap, m["id"], m["name"], sm.source),
+    }
 
 
-def _model_api(m: dict[str, Any], v: dict[str, Any] | None, full: bool = True) -> dict[str, Any]:
+def _files(snap: store.Snapshot, model_id: str, name: str, source: str) -> list[dict[str, str]]:
+    """The model's text plus every other model of the project, so packages in one
+    model can import packages from another."""
+    return [{"name": f"{name}.sysml", "text": source}] + [
+        {"name": f"{o.name}.sysml", "text": o.source} for o in snap.models.values() if o.id != model_id
+    ]
+
+
+def _files_key(files: list[dict[str, str]]) -> str:
+    return hashlib.sha256(json.dumps(files, sort_keys=True).encode()).hexdigest()
+
+
+def _iso(d: datetime | None) -> str | None:
+    return d.isoformat() if d else None
+
+
+def _model_api(m: dict[str, Any], v: dict[str, Any] | None = None, full: bool = True) -> dict[str, Any]:
+    commits = m["commits"]
     out = {
-        "id": str(m["id"]),
-        "projectId": str(m["project_id"]),
+        "id": m["id"],
+        "projectId": m["project_id"],
         "name": m["name"],
         "description": m["description"],
         "headVersion": m["head_version"],
-        "createdAt": m["created_at"].isoformat(),
-        "updatedAt": m["updated_at"].isoformat(),
+        "createdAt": _iso(store.created(commits[0])) if commits else None,
+        "updatedAt": _iso(store.created(commits[-1])) if commits else None,
     }
-    if v:
-        out["valid"] = v["valid"]
-        out["summary"] = v["summary"]
-        if full:
-            out.update(
-                source=v["source"],
-                diagnostics=v["diagnostics"],
-                graph=v["graph"],
-                elementCount=v["element_count"],
-                versionMessage=v["message"],
-            )
+    last = v["commit"] if v else commits[-1] if commits else None
+    if last:
+        out["valid"] = _valid(last)
+        out["commitId"] = last.id
+    if v and full:
+        d = _interpretation(v["files"])
+        out.update(
+            source=v["source"],
+            valid=v["valid"],
+            summary=d["summary"],
+            diagnostics=d["diagnostics"],
+            graph=d["graph"],
+            elementCount=v["element_count"],
+            versionMessage=v["message"],
+        )
     return out
 
 
-def _interpret(model: dict[str, Any], source: str, include_elements: bool) -> dict[str, Any]:
-    """Parse the model in its project context and keep only what this model's
-    own file declares (other models are context for imports only)."""
-    files = _context_files(model, source)
+def _interpret(files: list[dict[str, str]], include_elements: bool) -> dict[str, Any]:
+    """Parse the first file in its project context and keep only what that file
+    declares (the other models are context for imports only)."""
     parsed = _interpreter("/parse", {"files": files, "includeElements": include_elements})
     own = files[0]["name"]
     graph = parsed["graph"]
@@ -210,11 +275,8 @@ def _interpret(model: dict[str, Any], source: str, include_elements: bool) -> di
         return x in ids or x.split("::__")[0] in ids
 
     graph = {"nodes": own_nodes, "edges": [e for e in graph["edges"] if keep_end(e["source"]) and keep_end(e["target"])]}
-    roots = [n["id"] for n in own_nodes if n["owner"] is None]
-    elements = [
-        e for e in (parsed.get("elements") or [])
-        if any(e.get("@id", "") == r or e.get("@id", "").startswith(r + "_") for r in roots)
-    ]
+    roots = {n["id"] for n in own_nodes if n["owner"] is None}
+    elements = store.own_elements(parsed.get("elements") or [], roots)
     diagnostics = [d for d in parsed["diagnostics"] if d.get("file") in (own, None)]
     diagnostics += [
         {**d, "message": f"{d.get('file')}: {d['message']}", "line": 1, "column": 1, "file": own}
@@ -226,7 +288,7 @@ def _interpret(model: dict[str, Any], source: str, include_elements: bool) -> di
     summary: dict[str, int] = {}
     for n in own_nodes:
         summary[n["kind"]] = summary.get(n["kind"], 0) + 1
-    return {
+    res = {
         "valid": not any(d["severity"] == "error" for d in diagnostics),
         "diagnostics": diagnostics,
         "graph": graph,
@@ -234,44 +296,76 @@ def _interpret(model: dict[str, Any], source: str, include_elements: bool) -> di
         "elements": elements,
         "elapsedMs": parsed.get("elapsedMs"),
     }
+    _derived.put(_files_key(files), {k: v for k, v in res.items() if k != "elements"})
+    return res
 
 
-def _save_version(model: dict[str, Any], source: str, message: str, res: dict[str, Any] | None = None) -> dict[str, Any]:
-    res = res or _interpret(model, source, include_elements=True)
-    diagnostics, graph, elements, valid = res["diagnostics"], res["graph"], res["elements"], res["valid"]
-    with db.pool.connection() as c, c.transaction():
-        m = c.execute("SELECT head_version FROM models.model WHERE id=%s FOR UPDATE", (model["id"],)).fetchone()
-        version = m["head_version"] + 1
-        vid = c.execute(
-            """INSERT INTO models.model_version
-               (model_id, version, source, message, valid, diagnostics, graph, summary, element_count)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
-            (
-                model["id"], version, source, message, valid, Jsonb(diagnostics), Jsonb(graph),
-                Jsonb(res["summary"]), len(elements),
-            ),
-        ).fetchone()["id"]
-        if elements:
-            with c.cursor().copy(
-                "COPY models.element (version_id, element_id, metatype, name, qualified_name, owner_id, data) FROM STDIN"
-            ) as cp:
-                for e in elements:
-                    if "@id" not in e:
-                        continue
-                    owner = e.get("owner")
-                    cp.write_row(
-                        (
-                            vid,
-                            e["@id"],
-                            e.get("@type", "Element"),
-                            e.get("declaredName") or e.get("name"),
-                            e.get("qualifiedName"),
-                            owner.get("@id") if isinstance(owner, dict) else None,
-                            json.dumps(e),
-                        )
-                    )
-        c.execute("UPDATE models.model SET head_version=%s, updated_at=now() WHERE id=%s", (version, model["id"]))
-    return _head(str(model["id"]))
+def _interpretation(files: list[dict[str, str]]) -> dict[str, Any]:
+    """Diagnostics, diagram graph and summary of the first file (cached by content)."""
+    return _derived.get(_files_key(files)) or _interpret(files, include_elements=False)
+
+
+def _stored_payloads(project_id: str, model_id: str, c: store.Commit | None) -> dict[str, Any]:
+    """The API payloads of a model as committed in ``c`` (re-derived from its text
+    when this process did not make that commit)."""
+    if not c:
+        return {}
+    hit = _payloads.get(model_id)
+    if hit and hit[0] == c.id:
+        return hit[1]
+    snap = store.snapshot(project_id, c.id)
+    sm = snap.models.get(model_id)
+    if not sm:
+        return {}
+    res = _interpret(_files(snap, model_id, sm.name, sm.source), include_elements=True)
+    return store.to_api(res["elements"], project_id, model_id, sm.name, sm.description, sm.source)
+
+
+def _write(
+    project_id: str, model_id: str, name: str, description: str, source: str, elements: list[dict[str, Any]],
+    message: str, valid: bool, authored: str | None = None,
+) -> int:
+    """Commit a version of a model to the SysML v2 API server: only the elements that
+    changed since the model's previous version. Returns the new version number."""
+    with store.lock(project_id):
+        head, snap, hist = _state(project_id)
+        if model_id not in snap.models and any(o.name == name for o in snap.models.values()):
+            raise HTTPException(409, f"model '{name}' already exists in this project")
+        previous = _versions(hist, model_id)
+        after = store.to_api(elements, project_id, model_id, name, description, source)
+        before = _stored_payloads(project_id, model_id, previous[-1] if previous else None)
+        trailers = {
+            "Model-Id": model_id, "Model-Name": name, "Valid": str(valid).lower(), "Elements": len(elements), "Authored": authored,
+        }
+        description_ = store.describe(message, trailers)
+        try:
+            c = store.commit(project_id, head, store.changes(before, after), description_)
+        except store.StoreError:
+            # refused, e.g. for a reference into another model whose last save did not parse
+            # (so its elements are not stored): drop references the project cannot resolve
+            after = store.prune(after, store.element_ids(project_id, head))
+            c = store.commit(project_id, head, store.changes(before, after), description_)
+        models = {**snap.models, model_id: store.StoredModel(model_id, name, description, source)}
+        store.remember(project_id, c.id, store.Snapshot(c.id, models))
+        _payloads[model_id] = (c.id, after)
+        _model_project[model_id] = project_id
+        return len(previous) + 1
+
+
+def _save_version(m: dict[str, Any], source: str, message: str, res: dict[str, Any] | None = None) -> int:
+    """Interpret the text in its project context and commit it as the model's next version."""
+    res = res or _interpret(_files(m["snapshot"], m["id"], m["name"], source), include_elements=True)
+    return _write(m["project_id"], m["id"], m["name"], m["description"], source, res["elements"], message, res["valid"])
+
+
+def _new_model(project_id: str, name: str, description: str) -> dict[str, Any]:
+    snap = _state(project_id)[1]
+    return {"id": str(uuid.uuid4()), "project_id": project_id, "name": name, "description": description, "snapshot": snap}
+
+
+def _migrate_version(project_id: str, model_id: str, name: str, description: str, source: str,
+                     elements: list[dict[str, Any]], message: str, valid: bool, authored: str) -> None:
+    _write(project_id, model_id, name, description, source, elements, message, valid, authored)
 
 
 # ------------------------------------------------------------------ app
@@ -293,36 +387,20 @@ DEMOS = [
 
 
 def _seed_demo() -> None:
-    with db.pool.connection() as c:
-        if not c.execute("SELECT 1 FROM models.seed LIMIT 1").fetchone() and c.execute("SELECT 1 FROM models.project LIMIT 1").fetchone():
-            # a database from before seeds were recorded: it already had its chance at the first demo
-            c.execute("INSERT INTO models.seed (name) VALUES ('demo') ON CONFLICT DO NOTHING")
     for key, project, description, models in DEMOS:
         if not all((EXAMPLES_DIR / f).exists() for _, f, _ in models):
             continue
-        with db.pool.connection() as c, c.transaction():
+        with db.pool.connection() as c:
             if not c.execute("INSERT INTO models.seed (name) VALUES (%s) ON CONFLICT DO NOTHING RETURNING name", (key,)).fetchone():
-                continue  # seeded before (and maybe deleted since), or another worker is seeding it
-            pid = c.execute(
-                "INSERT INTO models.project (name, description) VALUES (%s,%s) ON CONFLICT (name) DO NOTHING RETURNING id",
-                (project, description),
-            ).fetchone()
-            if not pid:
-                continue
-            rows = [
-                (
-                    c.execute(
-                        "INSERT INTO models.model (project_id, name, description) VALUES (%s,%s,%s) RETURNING *",
-                        (pid["id"], name, desc),
-                    ).fetchone(),
-                    (EXAMPLES_DIR / f).read_text(),
-                )
-                for name, f, desc in models
-            ]
-        for m, text in rows:
+                continue  # seeded before (and maybe deleted since)
+        if any(p.get("name") == project for p in _projects()):
+            continue
+        pid = store.create_project(project, description)["@id"]
+        for name, f, desc in models:
+            m = _new_model(pid, name, desc)
             for attempt in range(60):  # the interpreter may still be starting
                 try:
-                    _save_version(m, text, "Seed example")
+                    _save_version(m, (EXAMPLES_DIR / f).read_text(), "Seed example")
                     break
                 except HTTPException as exc:
                     log.info("waiting for interpreter to seed %s (%s)", project, exc.detail)
@@ -330,87 +408,124 @@ def _seed_demo() -> None:
         log.info("seeded demo project %s", project)
 
 
+def _startup() -> None:
+    for attempt in range(150):  # the SysML v2 API server takes a while to start
+        try:
+            store.ping()
+            break
+        except store.StoreError as exc:
+            if attempt % 10 == 0:
+                log.info("waiting for the SysML v2 API server (%s)", exc)
+            time.sleep(2)
+    try:
+        if MIGRATE_LEGACY:
+            legacy.migrate(_migrate_version, _remove_project)
+        if SEED_DEMO:
+            _seed_demo()
+    except Exception:
+        log.exception("startup tasks failed")
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     db.init()
-    if SEED_DEMO:
-        threading.Thread(target=_seed_demo, daemon=True).start()
+    threading.Thread(target=_startup, daemon=True).start()
     yield
     db.pool.close()
 
 
 app = FastAPI(
     title="SysML v2 Model Service",
-    version="0.1.0",
-    description="Projects, versioned SysML v2 models, interpreted elements (SysML v2 API JSON) and runs.",
+    version="0.2.0",
+    description="Projects and versioned SysML v2 models, stored in a SysML v2 API server; interpretation and runs.",
     lifespan=lifespan,
 )
 app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+
+
+@app.exception_handler(store.StoreError)
+async def _store_error(_: Any, exc: store.StoreError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
 
 
 @app.get("/health")
 def health() -> dict[str, str]:
     with db.pool.connection() as c:
         c.execute("SELECT 1")
-    return {"status": "ok"}
+    store.ping()
+    return {"status": "ok", "sysmlApi": store.API_URL}
 
 
 # ------------------------------------------------------------------ projects
+def _project_api(p: dict[str, Any], model_count: int) -> dict[str, Any]:
+    return {"id": p["@id"], "name": p.get("name") or "", "description": p.get("description") or "",
+            "modelCount": model_count, "createdAt": p.get("created")}
+
+
+_project_names = threading.Lock()
+
+
+def _projects() -> list[dict[str, Any]]:
+    deleted = db.deleted_projects()
+    return [p for p in store.projects() if p["@id"] not in deleted]
+
+
 @app.get("/projects")
 def list_projects() -> list[dict[str, Any]]:
-    with db.pool.connection() as c:
-        rows = c.execute(
-            """SELECT p.*, count(m.id) AS model_count FROM models.project p
-               LEFT JOIN models.model m ON m.project_id=p.id GROUP BY p.id ORDER BY p.created_at"""
-        ).fetchall()
-    return [
-        {"id": str(r["id"]), "name": r["name"], "description": r["description"], "modelCount": r["model_count"],
-         "createdAt": r["created_at"].isoformat()}
-        for r in rows
-    ]
+    """The projects of the SysML v2 API server."""
+    out = []
+    for p in sorted(_projects(), key=lambda p: p.get("created") or ""):
+        try:
+            out.append(_project_api(p, len(_state(p["@id"])[1].models)))
+        except HTTPException:
+            continue  # deleted meanwhile
+    return out
 
 
 @app.post("/projects", status_code=201)
 def create_project(p: ProjectIn) -> dict[str, Any]:
-    with db.pool.connection() as c:
-        r = c.execute(
-            "INSERT INTO models.project (name, description) VALUES (%s,%s) ON CONFLICT (name) DO NOTHING RETURNING *",
-            (p.name, p.description),
-        ).fetchone()
-    if not r:
-        raise HTTPException(409, f"project '{p.name}' already exists")
-    return {"id": str(r["id"]), "name": r["name"], "description": r["description"], "modelCount": 0,
-            "createdAt": r["created_at"].isoformat()}
+    with _project_names:
+        if any(x.get("name") == p.name for x in _projects()):
+            raise HTTPException(409, f"project '{p.name}' already exists")
+        return _project_api(store.create_project(p.name, p.description), 0)
 
 
 @app.delete("/projects/{project_id}", status_code=204)
 def delete_project(project_id: uuid.UUID) -> None:
+    pid = str(project_id)
+    try:
+        models = list(_state(pid)[1].models)
+    except HTTPException:
+        return
+    _remove_project(pid)
     with db.pool.connection() as c:
-        c.execute("DELETE FROM models.project WHERE id=%s", (project_id,))
+        c.execute("DELETE FROM models.run WHERE model_id = ANY(%s)", (models,))
+    for mid in models:
+        _model_project.pop(mid, None)
+        _payloads.pop(mid, None)
+
+
+def _remove_project(project_id: str) -> None:
+    """Delete a project from the API server or, where it refuses, commit the removal of
+    its models and hide the project (its history stays in the API server)."""
+    if store.delete_project(project_id):
+        return
+    for mid in list(_state(project_id)[1].models):
+        _delete_model(project_id, mid)
+    db.mark_deleted(project_id)
 
 
 @app.get("/projects/{project_id}/models")
 def list_models(project_id: uuid.UUID) -> list[dict[str, Any]]:
-    with db.pool.connection() as c:
-        rows = c.execute(
-            """SELECT m.*, v.valid, v.summary FROM models.model m
-               LEFT JOIN models.model_version v ON v.model_id=m.id AND v.version=m.head_version
-               WHERE m.project_id=%s ORDER BY m.name""",
-            (project_id,),
-        ).fetchall()
-    return [_model_api(r, r if r["valid"] is not None else None, full=False) for r in rows]
+    pid = str(project_id)
+    head, snap, hist = _state(pid)
+    return [_model_api(_model(pid, sm, head, snap, hist), full=False) for sm in snap.models.values()]
 
 
-def _library_imports(project_id: uuid.UUID) -> str:
+def _library_imports(snap: store.Snapshot) -> str:
     """Imports of the project's packages that declare the #SystemArchitecture tag."""
-    with db.pool.connection() as c:
-        rows = c.execute(
-            """SELECT v.source FROM models.model m
-               JOIN models.model_version v ON v.model_id=m.id AND v.version=m.head_version
-               WHERE m.project_id=%s ORDER BY m.name""",
-            (project_id,),
-        ).fetchall()
-    pkgs = [m.group(1) for r in rows if _TAG_RE.search(r["source"]) for m in [_TOP_PKG_RE.search(r["source"])] if m]
+    sources = [sm.source for sm in snap.models.values()]
+    pkgs = [m.group(1) for s in sources if _TAG_RE.search(s) for m in [_TOP_PKG_RE.search(s)] if m]
     if not pkgs:
         return "    // No component library in this project yet: create one from the 'Component library' template.\n"
     return "".join(f"    private import {p}::*;\n" for p in dict.fromkeys(pkgs))
@@ -418,6 +533,9 @@ def _library_imports(project_id: uuid.UUID) -> str:
 
 @app.post("/projects/{project_id}/models", status_code=201)
 def create_model(project_id: uuid.UUID, body: ModelIn) -> dict[str, Any]:
+    m = _new_model(str(project_id), body.name, body.description)
+    if any(o.name == body.name for o in m["snapshot"].models.values()):
+        raise HTTPException(409, f"model '{body.name}' already exists in this project")
     pkg = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in body.name)
     source = body.source
     if source is None:
@@ -428,73 +546,80 @@ def create_model(project_id: uuid.UUID, body: ModelIn) -> dict[str, Any]:
         elif body.template == "library":
             source = LIBRARY_TEMPLATE.format(name=pkg)
         elif body.template == "architecture":
-            imports = _library_imports(project_id)
+            imports = _library_imports(m["snapshot"])
             source = ARCHITECTURE_TEMPLATE.format(name=pkg, imports=imports)
             if "import" not in imports:  # nothing declares the tag yet
                 source = source.replace("#SystemArchitecture part def", "part def")
         else:
             source = EMPTY_TEMPLATE.format(name=pkg)
-    with db.pool.connection() as c:
-        if not c.execute("SELECT 1 FROM models.project WHERE id=%s", (project_id,)).fetchone():
-            raise HTTPException(404, "project not found")
-        m = c.execute(
-            """INSERT INTO models.model (project_id, name, description) VALUES (%s,%s,%s)
-               ON CONFLICT (project_id, name) DO NOTHING RETURNING *""",
-            (project_id, body.name, body.description),
-        ).fetchone()
-    if not m:
-        raise HTTPException(409, f"model '{body.name}' already exists in this project")
-    v = _save_version(m, source, "Created")
-    return _model_api(_model_row(str(m["id"])), v)
+    _save_version(m, source, "Created")
+    m = _model_row(m["id"])
+    return _model_api(m, _version(m))
 
 
 # ------------------------------------------------------------------ models
 @app.get("/models/{model_id}")
 def get_model(model_id: str, version: int | None = None) -> dict[str, Any]:
     m = _model_row(model_id)
-    return _model_api(m, _head(model_id, version))
+    v = _version(m, version)
+    if version and not v:
+        raise HTTPException(404, f"model has no version {version}")
+    return _model_api(m, v)
 
 
 @app.delete("/models/{model_id}", status_code=204)
 def delete_model(model_id: str) -> None:
-    _model_row(model_id)
+    """Commit the removal of the model's elements, its text and its root Namespace."""
+    m = _model_row(model_id)
+    _delete_model(m["project_id"], model_id)
     with db.pool.connection() as c:
-        c.execute("DELETE FROM models.model WHERE id=%s", (model_id,))
+        c.execute("DELETE FROM models.run WHERE model_id=%s", (model_id,))
+
+
+def _delete_model(pid: str, model_id: str) -> None:
+    with store.lock(pid):
+        head, snap, hist = _state(pid)
+        sm = snap.models.get(model_id)
+        if sm:
+            previous = _versions(hist, model_id)
+            before = _stored_payloads(pid, model_id, previous[-1] if previous else None)
+            before = before or store.to_api([], pid, model_id, sm.name, sm.description, "")
+            trailers = {"Model-Id": model_id, "Model-Name": sm.name, "Deleted": "true"}
+            c = store.commit(pid, head, store.changes(before, {}), store.describe(f"Delete model {sm.name}", trailers))
+            models = {k: v for k, v in snap.models.items() if k != model_id}
+            store.remember(pid, c.id, store.Snapshot(c.id, models))
+    _payloads.pop(model_id, None)
+    _model_project.pop(model_id, None)
 
 
 @app.put("/models/{model_id}/source")
 def save_source(model_id: str, body: SourceIn) -> dict[str, Any]:
-    """Save a new version of the SysML v2 text (interpreted and stored)."""
+    """Save a new version of the SysML v2 text (interpreted and committed)."""
     m = _model_row(model_id)
-    head = _head(model_id)
-    if head and head["source"] == body.source:
-        return _model_api(m, head)
-    v = _save_version(m, body.source, body.message)
-    return _model_api(_model_row(model_id), v)
+    v = _version(m)
+    if not (v and v["source"] == body.source):
+        _save_version(m, body.source, body.message)
+        m = _model_row(model_id)
+        v = _version(m)
+    return _model_api(m, v)
 
 
 @app.post("/models/{model_id}/preview")
 def preview(model_id: str, body: SourceIn) -> dict[str, Any]:
     """Interpret unsaved text (live editing): diagnostics + diagram graph, nothing stored."""
     m = _model_row(model_id)
-    res = _interpret(m, body.source, include_elements=False)
+    res = _interpret(_files(m["snapshot"], m["id"], m["name"], body.source), include_elements=False)
     res.pop("elements", None)
     return res
 
 
 @app.get("/models/{model_id}/versions")
 def list_versions(model_id: str) -> list[dict[str, Any]]:
-    _model_row(model_id)
-    with db.pool.connection() as c:
-        rows = c.execute(
-            """SELECT version, message, valid, element_count, summary, created_at, length(source) AS size
-               FROM models.model_version WHERE model_id=%s ORDER BY version DESC""",
-            (model_id,),
-        ).fetchall()
+    m = _model_row(model_id)
     return [
-        {"version": r["version"], "message": r["message"], "valid": r["valid"], "elementCount": r["element_count"],
-         "summary": r["summary"], "size": r["size"], "createdAt": r["created_at"].isoformat()}
-        for r in rows
+        {"version": n, "message": c.message, "valid": _valid(c), "elementCount": int(c.trailers.get("Elements") or 0),
+         "createdAt": _iso(store.created(c)), "commitId": c.id}
+        for n, c in reversed(list(enumerate(m["commits"], 1)))
     ]
 
 
@@ -506,34 +631,28 @@ def list_elements(
     version: int | None = None,
     limit: int = Query(500, le=5000),
 ) -> list[dict[str, Any]]:
-    """Interpreted elements (SysML v2 API JSON) of a version, default head."""
-    _model_row(model_id)
-    v = _head(model_id, version)
+    """The model's elements as the SysML v2 API server holds them at a version (default head)."""
+    m = _model_row(model_id)
+    v = _version(m, version)
     if not v:
         return []
-    sql = "SELECT data FROM models.element WHERE version_id=%s"
-    p: list[Any] = [v["id"]]
-    if metatype:
-        sql += " AND metatype=%s"
-        p.append(metatype)
+    ids = set(_stored_payloads(m["project_id"], model_id, v["commit"]))
+    els = [e for e in store.elements(m["project_id"], v["commit"].id, metatype) if e.get("@id") in ids]
     if q:
-        sql += " AND qualified_name ILIKE %s"
-        p.append(f"%{q}%")
-    sql += " ORDER BY qualified_name NULLS LAST LIMIT %s"
-    p.append(limit)
-    with db.pool.connection() as c:
-        return [r["data"] for r in c.execute(sql, p).fetchall()]
+        els = [e for e in els if q.lower() in (e.get("qualifiedName") or "").lower()]
+    els.sort(key=lambda e: (e.get("qualifiedName") is None, e.get("qualifiedName") or ""))
+    return els[:limit]
 
 
 @app.get("/models/{model_id}/requirements")
 def requirements(model_id: str) -> list[dict[str, Any]]:
     """Requirements with their text, constraints, subject, satisfying elements and
     the latest verdict from a satisfy / requirement run."""
-    _model_row(model_id)
-    v = _head(model_id)
+    m = _model_row(model_id)
+    v = _version(m)
     if not v:
         return []
-    graph = v["graph"]
+    graph = _interpretation(v["files"])["graph"]
     nodes = {n["id"]: n for n in graph["nodes"]}
     satisfied_by: dict[str, list[str]] = {}
     for e in graph["edges"]:
@@ -606,11 +725,11 @@ def create_run(model_id: str, body: RunIn) -> dict[str, Any]:
     service over REST while this runs; those calls are tagged with the run id.
     """
     m = _model_row(model_id)
-    head = _head(model_id)
+    head = _version(m)
     if not head:
         raise HTTPException(409, "model has no version yet")
     run_id = str(uuid.uuid4())
-    files = _context_files(m, head["source"])
+    files = head["files"]
     result = _interpreter("/execute", {"files": files, **body.model_dump(), "runId": run_id})
     with db.pool.connection() as c:
         r = c.execute(
@@ -688,15 +807,8 @@ class ConfigurationIn(BaseModel):
 
 
 def _project_heads(project_id: uuid.UUID) -> list[dict[str, Any]]:
-    with db.pool.connection() as c:
-        if not c.execute("SELECT 1 FROM models.project WHERE id=%s", (project_id,)).fetchone():
-            raise HTTPException(404, "project not found")
-        return c.execute(
-            """SELECT m.id, m.name, v.source FROM models.model m
-               JOIN models.model_version v ON v.model_id=m.id AND v.version=m.head_version
-               WHERE m.project_id=%s ORDER BY m.name""",
-            (project_id,),
-        ).fetchall()
+    snap = _state(str(project_id))[1]
+    return [{"id": sm.id, "name": sm.name, "source": sm.source} for sm in snap.models.values()]
 
 
 def _project_catalog(project_id: uuid.UUID) -> tuple[dict[str, Any], dict[str, str]]:
@@ -747,15 +859,15 @@ def _commit(model_id: str, source: str, message: str) -> dict[str, Any]:
     """Save edited model text, refusing an edit that adds errors (in this model
     or in a model that refers to it)."""
     m = _model_row(model_id)
-    head = _head(model_id)
-    before = sum(1 for d in (head["diagnostics"] if head else []) if d["severity"] == "error")
-    res = _interpret(m, source, include_elements=True)
+    head = _version(m)
+    before = sum(1 for d in (_interpretation(head["files"])["diagnostics"] if head else []) if d["severity"] == "error")
+    res = _interpret(_files(m["snapshot"], m["id"], m["name"], source), include_elements=True)
     errors = [d for d in res["diagnostics"] if d["severity"] == "error"]
     if len(errors) > before:
         detail = "; ".join(f"line {d['line']}: {d['message']}" for d in errors[:3])
         raise HTTPException(422, f"The change would make '{m['name']}' invalid, so it was not saved. {detail}")
-    v = _save_version(m, source, message, res)
-    return {"modelId": model_id, "modelName": m["name"], "version": v["version"], "valid": v["valid"]}
+    version = _save_version(m, source, message, res)
+    return {"modelId": model_id, "modelName": m["name"], "version": version, "valid": res["valid"]}
 
 
 def _place(cat: dict[str, Any], sources: dict[str, str], name: str, package: str, replace: dict[str, Any] | None):

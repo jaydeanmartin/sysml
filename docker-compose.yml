@@ -46,13 +46,33 @@ services:
     ports:
       - "8002:8002"
 
-  # Projects, versioned models, interpreted elements (SysML v2 API JSON) and runs
+  # SysML v2 API & Services (OMG pilot implementation): stores the projects, models and
+  # their history as commits. Tables live in the sysml_api schema of the platform database.
+  sysml-api:
+    build:
+      context: ./services/sysml-api
+      args:
+        # 'source' builds the pilot with sbt; or name a prebuilt pilot image to reuse it
+        PILOT_IMAGE: ${SYSML_API_PILOT_IMAGE:-source}
+    environment:
+      SYSML_API_DB_URL: jdbc:postgresql://postgres:5432/sysml
+      SYSML_API_DB_USER: sysml
+      SYSML_API_DB_PASSWORD: sysml
+      SYSML_API_DB_SCHEMA: sysml_api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "9000:9000"
+
+  # Projects and versioned models (stored in the SysML v2 API server), interpretation and runs
   model:
     build:
       context: .
       dockerfile: services/model/Dockerfile
     environment:
       DATABASE_URL: postgresql://sysml:sysml@postgres:5432/sysml
+      SYSML_API_URL: http://sysml-api:9000
       INTERPRETER_SERVICE_URL: http://interpreter:8002
       ANALYSIS_SERVICE_URL: http://analysis:8003
       SEED_DEMO: "true"
@@ -60,6 +80,8 @@ services:
       postgres:
         condition: service_healthy
       interpreter:
+        condition: service_started
+      sysml-api:
         condition: service_started
     ports:
       - "8001:8001"
@@ -71,6 +93,7 @@ services:
       - model
       - interpreter
       - analysis
+      - sysml-api
     ports:
       - "8080:80"
 

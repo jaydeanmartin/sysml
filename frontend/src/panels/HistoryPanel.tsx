@@ -3,13 +3,14 @@ import { api } from "../api";
 import type { Run, Version } from "../types";
 
 interface Props {
+  projectId: string;
   modelId: string;
   refreshKey: string;
   onRestore(source: string, version: number): void;
   onShowRun(run: Run): void;
 }
 
-export function HistoryPanel({ modelId, refreshKey, onRestore, onShowRun }: Props) {
+export function HistoryPanel({ projectId, modelId, refreshKey, onRestore, onShowRun }: Props) {
   const [versions, setVersions] = useState<Version[]>([]);
   const [runs, setRuns] = useState<Run[]>([]);
 
@@ -31,6 +32,17 @@ export function HistoryPanel({ modelId, refreshKey, onRestore, onShowRun }: Prop
                   <span className={`dot ${v.valid ? "ok" : "bad"}`} /> {v.message || <span className="muted">no message</span>}
                 </td>
                 <td className="small muted">{v.elementCount} elements</td>
+                <td className="small">
+                  <a
+                    className="mono muted"
+                    href={`/api/sysml-v2/projects/${projectId}/commits/${v.commitId}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    title="This version's commit in the SysML v2 API"
+                  >
+                    {v.commitId.slice(0, 8)}
+                  </a>
+                </td>
                 <td className="small muted">{new Date(v.createdAt).toLocaleString()}</td>
                 <td>
                   <button

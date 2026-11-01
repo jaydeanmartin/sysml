@@ -1,3 +1,11 @@
+"""PostgreSQL holds what is not model data: runs, which demos were seeded and which
+projects were deleted.
+
+Projects, models and their versions live in the SysML v2 API server (see store.py).
+The tables of earlier releases (models.project, models.model, models.model_version,
+models.element) are left as they were; legacy.py copies them into the API server once.
+"""
+
 import os
 
 from psycopg.rows import dict_row
@@ -7,61 +15,11 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://sysml:sysml@postgres
 
 SCHEMA = """
 CREATE SCHEMA IF NOT EXISTS models;
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
-
-CREATE TABLE IF NOT EXISTS models.project (
-    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    name        TEXT NOT NULL UNIQUE,
-    description TEXT NOT NULL DEFAULT '',
-    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-
-CREATE TABLE IF NOT EXISTS models.model (
-    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    project_id   UUID NOT NULL REFERENCES models.project(id) ON DELETE CASCADE,
-    name         TEXT NOT NULL,
-    description  TEXT NOT NULL DEFAULT '',
-    head_version INTEGER NOT NULL DEFAULT 0,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (project_id, name)
-);
-
--- Every save of the SysML v2 text is an immutable version (the commit history)
-CREATE TABLE IF NOT EXISTS models.model_version (
-    id            BIGSERIAL PRIMARY KEY,
-    model_id      UUID NOT NULL REFERENCES models.model(id) ON DELETE CASCADE,
-    version       INTEGER NOT NULL,
-    source        TEXT NOT NULL,
-    message       TEXT NOT NULL DEFAULT '',
-    valid         BOOLEAN NOT NULL,
-    diagnostics   JSONB NOT NULL DEFAULT '[]'::jsonb,
-    graph         JSONB NOT NULL DEFAULT '{"nodes": [], "edges": []}'::jsonb,
-    summary       JSONB NOT NULL DEFAULT '{}'::jsonb,
-    element_count INTEGER NOT NULL DEFAULT 0,
-    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
-    UNIQUE (model_id, version)
-);
-
--- The interpreted model, as SysML v2 API JSON elements (one row per element)
-CREATE TABLE IF NOT EXISTS models.element (
-    version_id     BIGINT NOT NULL REFERENCES models.model_version(id) ON DELETE CASCADE,
-    element_id     TEXT NOT NULL,
-    metatype       TEXT NOT NULL,
-    name           TEXT,
-    qualified_name TEXT,
-    owner_id       TEXT,
-    data           JSONB NOT NULL,
-    PRIMARY KEY (version_id, element_id)
-);
-CREATE INDEX IF NOT EXISTS element_type_idx ON models.element (version_id, metatype);
-CREATE INDEX IF NOT EXISTS element_qn_idx ON models.element (qualified_name);
-CREATE INDEX IF NOT EXISTS element_data_idx ON models.element USING GIN (data jsonb_path_ops);
 
 -- Executions of the model (calcs, analyses, requirement checks, behaviors)
 CREATE TABLE IF NOT EXISTS models.run (
     id          UUID PRIMARY KEY,
-    model_id    UUID NOT NULL REFERENCES models.model(id) ON DELETE CASCADE,
+    model_id    UUID NOT NULL,
     version     INTEGER NOT NULL,
     kind        TEXT NOT NULL,
     target      TEXT,
@@ -71,9 +29,19 @@ CREATE TABLE IF NOT EXISTS models.run (
     elapsed_ms  INTEGER,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- models are no longer rows here (earlier releases referenced models.model)
+ALTER TABLE models.run DROP CONSTRAINT IF EXISTS run_model_id_fkey;
 CREATE INDEX IF NOT EXISTS run_model_idx ON models.run (model_id, created_at DESC);
 
--- Demo projects already seeded once (so a deleted demo is not re-created)
+-- Projects deleted in the studio. The pilot SysML v2 API server cannot delete a project
+-- that has commits, so their models are removed by a commit and the project is hidden.
+CREATE TABLE IF NOT EXISTS models.deleted_project (
+    id         UUID PRIMARY KEY,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Demo projects already seeded once (so a deleted demo is not re-created), and
+-- legacy projects already copied into the SysML v2 API server ('migrated:<id>')
 CREATE TABLE IF NOT EXISTS models.seed (
     name       TEXT PRIMARY KEY,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -91,3 +59,13 @@ def init() -> None:
             c.execute(SCHEMA)
         finally:
             c.execute("SELECT pg_advisory_unlock(4202)")
+
+
+def deleted_projects() -> set[str]:
+    with pool.connection() as c:
+        return {str(r["id"]) for r in c.execute("SELECT id FROM models.deleted_project")}
+
+
+def mark_deleted(project_id: str) -> None:
+    with pool.connection() as c:
+        c.execute("INSERT INTO models.deleted_project (id) VALUES (%s) ON CONFLICT DO NOTHING", (project_id,))

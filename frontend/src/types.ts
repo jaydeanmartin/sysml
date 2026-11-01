@@ -68,11 +68,13 @@ export interface ModelSummary {
   description: string;
   headVersion: number;
   valid?: boolean;
-  summary?: Record<string, number>;
+  /** the SysML v2 API commit of the head version */
+  commitId?: string;
 }
 
 export interface Model extends ModelSummary {
   source: string;
+  summary: Record<string, number>;
   diagnostics: Diagnostic[];
   graph: Graph;
   elementCount: number;
@@ -205,8 +207,9 @@ export interface Version {
   message: string;
   valid: boolean;
   elementCount: number;
-  size: number;
   createdAt: string;
+  /** the SysML v2 API commit that saved this version */
+  commitId: string;
 }
 
 // ------------------------------------------------------------ component library & configurator
