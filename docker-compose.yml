@@ -46,7 +46,7 @@ services:
     ports:
       - "8002:8002"
 
-  # Projects, versioned models, interpreted elements (SysML v2 API JSON) and runs
+  # Projects, versioned models and runs; the SysML v2 API repository (served at /sysml-v2)
   model:
     build:
       context: .

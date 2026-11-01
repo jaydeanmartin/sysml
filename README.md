@@ -1,6 +1,6 @@
 # SysML v2 Studio: microservices platform
 
-This project lets you write a SysML v2 model as text in the browser and see it drawn as diagrams while you type. It stores every version in PostgreSQL and runs the model with the **OpenMBEE OpenSysML** interpreter. While a model runs, its calcs and actions can call analyses over a REST API.
+This project lets you write a SysML v2 model as text in the browser and see it drawn as diagrams while you type. It stores every version in PostgreSQL, in a repository that any SysML v2 API client can read and write through the standard **SysML v2 API** (OMG Systems Modeling API and Services). It runs the model with the **OpenMBEE OpenSysML** interpreter. While a model runs, its calcs and actions can call analyses over a REST API.
 
 ```mermaid
 flowchart LR
@@ -9,6 +9,8 @@ flowchart LR
   end
   UI -->|/api/*| GW["nginx gateway<br/>(frontend container)"]
   GW -->|/api/models| MS["model service :8001<br/>projects · versions · elements · runs"]
+  GW -->|/api/sysml-v2| MS
+  CL["SysML v2 API clients<br/>(Jupyter %publish, tools)"] -->|/sysml-v2| MS
   GW -->|/api/analysis| AS["analysis service :8003<br/>registry · REST invoke · call log"]
   GW -->|/api/interpreter| IS["interpreter service :8002<br/>OpenSysML wrapper"]
   MS -->|parse / execute| IS
@@ -21,8 +23,8 @@ flowchart LR
 
 | Service | Port | Responsibility |
 |---|---|---|
-| `frontend` | 8080 | React UI (Vite build) served by nginx. nginx also routes `/api/models`, `/api/interpreter` and `/api/analysis` to the services. |
-| `model` | 8001 | Projects and models. Every save is a new, unchangeable version. The interpreted elements are stored as SysML v2 API JSON, one row per element. Also records runs and serves requirement traceability. |
+| `frontend` | 8080 | React UI (Vite build) served by nginx. nginx also routes `/api/models`, `/api/sysml-v2`, `/api/interpreter` and `/api/analysis` to the services. |
+| `model` | 8001 | Projects and models. Every save is a new, unchangeable version, stored as a commit of the project's SysML v2 API repository. The service serves that repository through the standard SysML v2 API at `/sysml-v2`. Also records runs and serves requirement traceability. |
 | `interpreter` | 8002 | Wraps the OpenSysML binary. Endpoints: validate/parse → diagnostics + diagram graph, execute (calc, analysis case, requirement, constraint, satisfy, action, state machine, expression), and OpenSysML's own rendering (Mermaid, DOT, PlantUML, D2). |
 | `analysis` | 8003 | Registry of analyses (`builtin` Python functions, `formula`, `external` REST endpoints). `POST /analyses/{name}/invoke` runs one. Every call is logged together with the id of the run that made it. |
 | `demo-external` | 8010 | An example third-party REST analysis (a thermal solver). It is registered in the registry as `thermalSolver`. |
@@ -149,6 +151,15 @@ Interactive OpenAPI docs are served at `/docs` on each service, e.g. http://loca
 - `POST /projects/{id}/catalog/components` `{"name", "package", "specializes"?, "abstract"?, "attributes": [{name, type}], "ports": [...]}`
 - `DELETE /projects/{id}/catalog/elements?qualifiedName=`
 
+**SysML v2 API** (Systems Modeling API and Services 1.0, REST/HTTP PSM): base URL `http://localhost:8001/sysml-v2`, or `http://localhost:8080/api/sysml-v2` through the gateway
+- `GET/POST /projects`, `GET/PUT/DELETE /projects/{projectId}`
+- `GET/POST /projects/{projectId}/branches`, `GET/DELETE …/branches/{branchId}`, `POST …/branches/{targetBranchId}/merge?sourceCommitId=`
+- `GET/POST /projects/{projectId}/tags`, `GET/DELETE …/tags/{tagId}`
+- `GET/POST /projects/{projectId}/commits[?branchId=]`, `GET …/commits/{commitId}`, `…/changes`, `…/changes/{changeId}`, `…/commits/{compareCommitId}/diff?baseCommitId=`
+- `GET …/commits/{commitId}/elements`, `…/elements/{elementId}`, `…/elements/{elementId}/relationships?direction=in|out|both`, `…/roots`
+- `GET/POST /projects/{projectId}/queries`, `GET/PUT/DELETE …/queries/{queryId}`, `GET …/queries/{queryId}/results[?commitId=]`, `GET/POST /projects/{projectId}/query-results[?commitId=]`
+- Collections are paged with `page[size]` (default 100), `page[after]` and `page[before]`. The next and previous pages are given in the `Link` header. Errors are `{"@type": "Error", "description": …}`.
+
 **Interpreter service** (stateless; send the files directly)
 - `POST /parse` `{"files": [{"name", "text"}], "includeElements": false}`
 - `POST /execute` `{"files", "kind", "target", ...}`
@@ -160,26 +171,43 @@ Interactive OpenAPI docs are served at `/docs` on each service, e.g. http://loca
 - `POST /analyses/{name}/invoke` `{"inputs": {...}, "uri"?, "runId"?}`
 - `GET /invocations?runId=&analysis=&limit=`
 
-## Data model (PostgreSQL)
+## Storage: a SysML v2 API repository
+
+The model service stores everything in the structure the SysML v2 API defines: projects, branches, tags and commits, where each commit holds versions of elements. The Studio maps onto it like this:
+
+| Studio | SysML v2 API |
+|---|---|
+| Project | Project, with a default branch `main` |
+| Model | A root `Namespace` (`@id` = model id, `declaredName` = model name) that owns the model's packages, a `Documentation` (the description) and a `TextualRepresentation` (language `sysml`, body = the text) |
+| Saved version | A commit on `main` named `<model> v<n>`, with the save message as its description. It holds only the elements that changed. |
+| Deleted model | A commit that deletes the model's elements. Earlier commits keep them. |
+
+- **Element ids** are UUIDs derived from the interpreter's ids, so an element keeps its id from one version to the next. References to the standard library keep the library's ids.
+- **Commits from other tools** (for example `%publish` in the SysML v2 Jupyter kernel) are stored as sent. Projects created that way appear in the Studio with no models. A commit that changes the text (`TextualRepresentation`) of a Studio model becomes a new version of that model.
+- **An invalid text** is still saved as a version. Its commit changes only the text, so the elements stay as they were in the last valid version.
+
+Example: every part definition at the head of a project.
+
+```bash
+curl -s -X POST http://localhost:8001/sysml-v2/projects/$PROJECT/query-results \
+  -H 'Content-Type: application/json' \
+  -d '{"@type": "Query", "select": ["declaredName"],
+       "where": {"@type": "PrimitiveConstraint", "property": "@type", "operator": "instanceOf", "value": ["PartDefinition"]}}'
+```
 
 | Table | Contents |
 |---|---|
-| `models.project`, `models.model` | Projects and models. `head_version` points at the current version. |
-| `models.model_version` | The full SysML text of each save, with validity, diagnostics, diagram graph and element count |
-| `models.element` | Each interpreted element as SysML v2 API JSON (`data jsonb`, with a GIN index), plus `metatype`, `qualified_name` and `owner_id` |
+| `models.project`, `models.branches`, `models.tags`, `models.queries` | API projects, branches, tags and saved queries |
+| `models.commits` | Commits with their previous commits |
+| `models.data_versions` | The changes of each commit: one row per created, updated or deleted (null `payload`) element, as SysML v2 API JSON (`jsonb`, with a GIN index) |
+| `models.commit_elements` | For each commit, every element it holds and the version it has there. Reading a commit is a single join, however long the history. |
+| `models.model`, `models.model_version` | Studio models and versions. Each version keeps its text, validity, diagnostics and diagram graph, and points at its commit. |
 | `models.run` | Execution requests and results: checks, values, trace |
 | `models.seed` | Demo projects already seeded, so a deleted demo is not re-created |
 | `analysis.analysis` | Analysis registry: kind, inputs and outputs with units, endpoint or formulas |
 | `analysis.invocation` | Every analysis call with its inputs, outputs, status, duration and `run_id` |
 
-Example query: every part usage in the latest version of each model.
-
-```sql
-SELECT m.name, e.qualified_name FROM models.element e
-JOIN models.model_version v ON v.id = e.version_id
-JOIN models.model m ON m.id = v.model_id AND v.version = m.head_version
-WHERE e.metatype = 'PartUsage';
-```
+**Upgrading.** On first start, a database from an earlier release is migrated: every project gets a `main` branch, and every saved version becomes a commit, in save order, with its elements from the old `models.element` table. The old table is left as it was and is no longer used. Once you have checked the migration, you can drop it (`DROP TABLE models.element`).
 
 Models in the same project can import each other's packages. The other models' latest versions are loaded alongside as context.
 
@@ -214,4 +242,11 @@ docker compose exec interpreter pytest
 - **Interpreter.** OpenSysML v0.11.0 is pinned (`OPENSYSML_VERSION` build arg). It is called as one CLI process per request. Parse and validate together take about 0.3–0.7 s for the example model. The adapter ([`opensysml.py`](services/interpreter/app/opensysml.py)) is small, so it can be replaced by OpenSysML's `sysml-grpc` service for long-lived, cached sessions. OpenSysML calls its SysML v2 API JSON export experimental.
 - **Diagrams.** The diagrams are drawn by this app from the interpreted element graph, using ELK for layout. They are not SysML v2 standard-conformant view rendering. OpenSysML's own renderings are available from `POST /render`.
 - **Solvers.** The interpreter image includes `z3`, which enables OpenSysML's `smt` and `solve` engines.
+- **SysML v2 API.** The behaviour follows the reference implementation (SysML-v2-API-Services) where that differs from the OpenAPI document, so that existing clients work. Tested with the SysML v2 Jupyter kernel 0.55.0 (`%publish`, `%projects`, `%load`).
+  - `Commit.previousCommit` is a single `{"@id"}`, as the reference implementation returns it. Set `SYSML_API_PREVIOUS_COMMIT=array` for the array form of the OpenAPI document, which also lists the second parent of a merge commit.
+  - A change with no `payload` is a deletion. Some clients leave out null fields.
+  - Not implemented: `/meta/datatypes`, element data reached through a `ProjectUsage` (`excludeUsed` is accepted and has no effect), and the `/x/named` extensions.
+  - Payloads are stored as sent. Derived properties are not computed and references are not checked.
+  - Project names must be unique (409).
+  - Each commit copies the project's element index (`models.commit_elements`, about 60 bytes per element), so storage grows with elements × commits.
 - **Not production-hardened.** There is no authentication or user management yet. Add an auth proxy (OIDC) in front of nginx before deploying for a team.

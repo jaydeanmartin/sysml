@@ -207,6 +207,8 @@ export interface Version {
   elementCount: number;
   size: number;
   createdAt: string;
+  /** The commit of this version in the project's SysML v2 API repository. */
+  commitId: string | null;
 }
 
 // ------------------------------------------------------------ component library & configurator

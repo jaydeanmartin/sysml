@@ -2,13 +2,14 @@
 
 The SysML v2 text is the source of truth. Each save creates an immutable
 version; the interpreter service validates it and returns the model as SysML v2
-API JSON elements (stored one row per element, queryable with JSONB) and a
-diagram graph. Executions are proxied to the interpreter and recorded.
+API JSON elements and a diagram graph. The elements are stored as a commit of
+the project in a SysML v2 API repository (``repo``), which this service also
+serves through the standard REST API under ``/sysml-v2`` (``sysml_api``).
+Executions are proxied to the interpreter and recorded.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
@@ -25,7 +26,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from psycopg.types.json import Jsonb
 from pydantic import BaseModel, Field
 
-from . import catalog, db
+from . import catalog, db, repo, sysml_api
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("model")
@@ -185,6 +186,7 @@ def _model_api(m: dict[str, Any], v: dict[str, Any] | None, full: bool = True) -
     if v:
         out["valid"] = v["valid"]
         out["summary"] = v["summary"]
+        out["commitId"] = v.get("commit_id") and str(v["commit_id"])
         if full:
             out.update(
                 source=v["source"],
@@ -210,11 +212,8 @@ def _interpret(model: dict[str, Any], source: str, include_elements: bool) -> di
         return x in ids or x.split("::__")[0] in ids
 
     graph = {"nodes": own_nodes, "edges": [e for e in graph["edges"] if keep_end(e["source"]) and keep_end(e["target"])]}
-    roots = [n["id"] for n in own_nodes if n["owner"] is None]
-    elements = [
-        e for e in (parsed.get("elements") or [])
-        if any(e.get("@id", "") == r or e.get("@id", "").startswith(r + "_") for r in roots)
-    ]
+    roots = {n["id"] for n in own_nodes if n["owner"] is None}
+    elements = repo.own_elements(parsed.get("elements") or [], roots)
     diagnostics = [d for d in parsed["diagnostics"] if d.get("file") in (own, None)]
     diagnostics += [
         {**d, "message": f"{d.get('file')}: {d['message']}", "line": 1, "column": 1, "file": own}
@@ -237,41 +236,58 @@ def _interpret(model: dict[str, Any], source: str, include_elements: bool) -> di
 
 
 def _save_version(model: dict[str, Any], source: str, message: str, res: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Interpret and store a new version: a commit of the elements that changed, plus
+    the version row. An invalid text that yields no elements keeps the previous
+    elements (only the stored text changes)."""
     res = res or _interpret(model, source, include_elements=True)
     diagnostics, graph, elements, valid = res["diagnostics"], res["graph"], res["elements"], res["valid"]
     with db.pool.connection() as c, c.transaction():
-        m = c.execute("SELECT head_version FROM models.model WHERE id=%s FOR UPDATE", (model["id"],)).fetchone()
+        m = c.execute("SELECT * FROM models.model WHERE id=%s FOR UPDATE", (model["id"],)).fetchone()
+        if not m:
+            raise HTTPException(404, "model not found")
         version = m["head_version"] + 1
-        vid = c.execute(
+        cm = repo.save_model(c, m, elements if elements or valid else None, source, message=message, version=version)
+        c.execute(
             """INSERT INTO models.model_version
-               (model_id, version, source, message, valid, diagnostics, graph, summary, element_count)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id""",
+               (model_id, version, source, message, valid, diagnostics, graph, summary, element_count, commit_id)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (
-                model["id"], version, source, message, valid, Jsonb(diagnostics), Jsonb(graph),
-                Jsonb(res["summary"]), len(elements),
+                m["id"], version, source, message, valid, Jsonb(diagnostics), Jsonb(graph),
+                Jsonb(res["summary"]), len(elements), cm["id"],
             ),
-        ).fetchone()["id"]
-        if elements:
-            with c.cursor().copy(
-                "COPY models.element (version_id, element_id, metatype, name, qualified_name, owner_id, data) FROM STDIN"
-            ) as cp:
-                for e in elements:
-                    if "@id" not in e:
-                        continue
-                    owner = e.get("owner")
-                    cp.write_row(
-                        (
-                            vid,
-                            e["@id"],
-                            e.get("@type", "Element"),
-                            e.get("declaredName") or e.get("name"),
-                            e.get("qualifiedName"),
-                            owner.get("@id") if isinstance(owner, dict) else None,
-                            json.dumps(e),
-                        )
-                    )
-        c.execute("UPDATE models.model SET head_version=%s, updated_at=now() WHERE id=%s", (version, model["id"]))
+        )
+        c.execute("UPDATE models.model SET head_version=%s, updated_at=now() WHERE id=%s", (version, m["id"]))
     return _head(str(model["id"]))
+
+
+def _sync_text_changes(project_id: Any, commit: dict[str, Any]) -> None:
+    """A commit made through the SysML v2 API that changes a model's
+    TextualRepresentation becomes a new version of that model (its elements are
+    the ones the commit holds)."""
+    with db.pool.connection() as c:
+        changed = repo.studio_text_changes(c, project_id, commit)
+    for m, text in changed:
+        try:
+            res = _interpret(m, text, include_elements=False)
+        except HTTPException as exc:
+            log.warning("could not interpret %s from commit %s: %s", m["name"], commit["id"], exc.detail)
+            res = {"valid": False, "graph": {"nodes": [], "edges": []}, "summary": {},
+                   "diagnostics": [{"severity": "error", "message": f"not interpreted: {exc.detail}", "file": f"{m['name']}.sysml", "line": 1, "column": 1}]}
+        with db.pool.connection() as c, c.transaction():
+            row = c.execute("SELECT head_version FROM models.model WHERE id=%s FOR UPDATE", (m["id"],)).fetchone()
+            if not row:
+                continue
+            count = len(repo.model_elements(c, commit["id"], m["id"]))
+            c.execute(
+                """INSERT INTO models.model_version
+                   (model_id, version, source, message, valid, diagnostics, graph, summary, element_count, commit_id)
+                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                (
+                    m["id"], row["head_version"] + 1, text, commit["description"] or "Commit through the SysML v2 API",
+                    res["valid"], Jsonb(res["diagnostics"]), Jsonb(res["graph"]), Jsonb(res["summary"]), count, commit["id"],
+                ),
+            )
+            c.execute("UPDATE models.model SET head_version=head_version+1, updated_at=now() WHERE id=%s", (m["id"],))
 
 
 # ------------------------------------------------------------------ app
@@ -303,11 +319,9 @@ def _seed_demo() -> None:
         with db.pool.connection() as c, c.transaction():
             if not c.execute("INSERT INTO models.seed (name) VALUES (%s) ON CONFLICT DO NOTHING RETURNING name", (key,)).fetchone():
                 continue  # seeded before (and maybe deleted since), or another worker is seeding it
-            pid = c.execute(
-                "INSERT INTO models.project (name, description) VALUES (%s,%s) ON CONFLICT (name) DO NOTHING RETURNING id",
-                (project, description),
-            ).fetchone()
-            if not pid:
+            try:
+                pid = repo.create_project(c, project, description)
+            except repo.RepoError:
                 continue
             rows = [
                 (
@@ -332,7 +346,7 @@ def _seed_demo() -> None:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    db.init()
+    db.init(repo.migrate)
     if SEED_DEMO:
         threading.Thread(target=_seed_demo, daemon=True).start()
     yield
@@ -342,10 +356,13 @@ async def lifespan(_: FastAPI):
 app = FastAPI(
     title="SysML v2 Model Service",
     version="0.1.0",
-    description="Projects, versioned SysML v2 models, interpreted elements (SysML v2 API JSON) and runs.",
+    description="Projects, versioned SysML v2 models, interpreted elements and runs. The repository is also "
+    "served through the standard SysML v2 API (Systems Modeling API and Services 1.0) under /sysml-v2.",
     lifespan=lifespan,
 )
-app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"])
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"], expose_headers=["Link"])
+sysml_api.install(app)
+sysml_api.on_commit = lambda project_id, commit: _sync_text_changes(project_id, commit)
 
 
 @app.get("/health")
@@ -372,13 +389,8 @@ def list_projects() -> list[dict[str, Any]]:
 
 @app.post("/projects", status_code=201)
 def create_project(p: ProjectIn) -> dict[str, Any]:
-    with db.pool.connection() as c:
-        r = c.execute(
-            "INSERT INTO models.project (name, description) VALUES (%s,%s) ON CONFLICT (name) DO NOTHING RETURNING *",
-            (p.name, p.description),
-        ).fetchone()
-    if not r:
-        raise HTTPException(409, f"project '{p.name}' already exists")
+    with db.pool.connection() as c, c.transaction():
+        r = repo.create_project(c, p.name, p.description)
     return {"id": str(r["id"]), "name": r["name"], "description": r["description"], "modelCount": 0,
             "createdAt": r["created_at"].isoformat()}
 
@@ -457,8 +469,9 @@ def get_model(model_id: str, version: int | None = None) -> dict[str, Any]:
 
 @app.delete("/models/{model_id}", status_code=204)
 def delete_model(model_id: str) -> None:
-    _model_row(model_id)
-    with db.pool.connection() as c:
+    m = _model_row(model_id)
+    with db.pool.connection() as c, c.transaction():
+        repo.delete_model(c, m)  # a commit deleting its elements; the history stays in the project
         c.execute("DELETE FROM models.model WHERE id=%s", (model_id,))
 
 
@@ -487,13 +500,14 @@ def list_versions(model_id: str) -> list[dict[str, Any]]:
     _model_row(model_id)
     with db.pool.connection() as c:
         rows = c.execute(
-            """SELECT version, message, valid, element_count, summary, created_at, length(source) AS size
+            """SELECT version, message, valid, element_count, summary, created_at, length(source) AS size, commit_id
                FROM models.model_version WHERE model_id=%s ORDER BY version DESC""",
             (model_id,),
         ).fetchall()
     return [
         {"version": r["version"], "message": r["message"], "valid": r["valid"], "elementCount": r["element_count"],
-         "summary": r["summary"], "size": r["size"], "createdAt": r["created_at"].isoformat()}
+         "summary": r["summary"], "size": r["size"], "createdAt": r["created_at"].isoformat(),
+         "commitId": r["commit_id"] and str(r["commit_id"])}
         for r in rows
     ]
 
@@ -506,23 +520,25 @@ def list_elements(
     version: int | None = None,
     limit: int = Query(500, le=5000),
 ) -> list[dict[str, Any]]:
-    """Interpreted elements (SysML v2 API JSON) of a version, default head."""
+    """Elements (SysML v2 API JSON) of a version, default head: the model's elements
+    in the commit of that version."""
     _model_row(model_id)
     v = _head(model_id, version)
-    if not v:
+    if not v or not v["commit_id"]:
         return []
-    sql = "SELECT data FROM models.element WHERE version_id=%s"
-    p: list[Any] = [v["id"]]
+    sql = """SELECT dv.payload FROM models.commit_elements ce JOIN models.data_versions dv ON dv.id=ce.version_id
+             WHERE ce.commit_id=%s AND dv.model_id=%s"""
+    p: list[Any] = [v["commit_id"], model_id]
     if metatype:
-        sql += " AND metatype=%s"
+        sql += " AND dv.payload->>'@type'=%s"
         p.append(metatype)
     if q:
-        sql += " AND qualified_name ILIKE %s"
+        sql += " AND dv.payload->>'qualifiedName' ILIKE %s"
         p.append(f"%{q}%")
-    sql += " ORDER BY qualified_name NULLS LAST LIMIT %s"
+    sql += " ORDER BY dv.payload->>'qualifiedName' NULLS LAST, ce.element_id LIMIT %s"
     p.append(limit)
     with db.pool.connection() as c:
-        return [r["data"] for r in c.execute(sql, p).fetchall()]
+        return [r["payload"] for r in c.execute(sql, p).fetchall()]
 
 
 @app.get("/models/{model_id}/requirements")

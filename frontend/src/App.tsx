@@ -508,8 +508,9 @@ export default function App() {
             </>
           )}
           {tab === "analyses" && <AnalysesPanel onInsert={(t) => insert(t)} />}
-          {tab === "history" && modelId && (
+          {tab === "history" && modelId && projectId && (
             <HistoryPanel
+              projectId={projectId}
               modelId={modelId}
               refreshKey={`${saved?.headVersion}:${lastRun?.id}`}
               onRestore={(src, v) => {

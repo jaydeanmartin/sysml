@@ -1,5 +1,7 @@
 import os
+from typing import Callable
 
+from psycopg import Connection
 from psycopg.rows import dict_row
 from psycopg_pool import ConnectionPool
 
@@ -27,7 +29,8 @@ CREATE TABLE IF NOT EXISTS models.model (
     UNIQUE (project_id, name)
 );
 
--- Every save of the SysML v2 text is an immutable version (the commit history)
+-- Every save of the SysML v2 text is a version of the model, stored as a commit
+-- of the project (commit_id). This row keeps the text and its interpretation for the UI.
 CREATE TABLE IF NOT EXISTS models.model_version (
     id            BIGSERIAL PRIMARY KEY,
     model_id      UUID NOT NULL REFERENCES models.model(id) ON DELETE CASCADE,
@@ -43,20 +46,76 @@ CREATE TABLE IF NOT EXISTS models.model_version (
     UNIQUE (model_id, version)
 );
 
--- The interpreted model, as SysML v2 API JSON elements (one row per element)
-CREATE TABLE IF NOT EXISTS models.element (
-    version_id     BIGINT NOT NULL REFERENCES models.model_version(id) ON DELETE CASCADE,
-    element_id     TEXT NOT NULL,
-    metatype       TEXT NOT NULL,
-    name           TEXT,
-    qualified_name TEXT,
-    owner_id       TEXT,
-    data           JSONB NOT NULL,
-    PRIMARY KEY (version_id, element_id)
+-- ---- SysML v2 API (Systems Modeling API and Services 1.0) repository
+ALTER TABLE models.project ADD COLUMN IF NOT EXISTS alias TEXT[] NOT NULL DEFAULT '{}';
+ALTER TABLE models.project ADD COLUMN IF NOT EXISTS default_branch_id UUID;
+
+CREATE TABLE IF NOT EXISTS models.commits (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id          UUID NOT NULL REFERENCES models.project(id) ON DELETE CASCADE,
+    seq                 BIGSERIAL,
+    name                TEXT,
+    description         TEXT,
+    alias               TEXT[] NOT NULL DEFAULT '{}',
+    previous_commit_ids UUID[] NOT NULL DEFAULT '{}',
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX IF NOT EXISTS element_type_idx ON models.element (version_id, metatype);
-CREATE INDEX IF NOT EXISTS element_qn_idx ON models.element (qualified_name);
-CREATE INDEX IF NOT EXISTS element_data_idx ON models.element USING GIN (data jsonb_path_ops);
+CREATE INDEX IF NOT EXISTS commits_project_idx ON models.commits (project_id, seq);
+
+CREATE TABLE IF NOT EXISTS models.branches (
+    id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id     UUID NOT NULL REFERENCES models.project(id) ON DELETE CASCADE,
+    name           TEXT NOT NULL,
+    description    TEXT,
+    alias          TEXT[] NOT NULL DEFAULT '{}',
+    head_commit_id UUID REFERENCES models.commits(id) ON DELETE SET NULL,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (project_id, name)
+);
+
+CREATE TABLE IF NOT EXISTS models.tags (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id       UUID NOT NULL REFERENCES models.project(id) ON DELETE CASCADE,
+    name             TEXT NOT NULL,
+    description      TEXT,
+    alias            TEXT[] NOT NULL DEFAULT '{}',
+    tagged_commit_id UUID NOT NULL REFERENCES models.commits(id) ON DELETE CASCADE,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    UNIQUE (project_id, name)
+);
+
+-- The changes of a commit: one DataVersion per created, updated or deleted (null payload)
+-- element. model_id: the Studio model the element belongs to (not part of the API).
+CREATE TABLE IF NOT EXISTS models.data_versions (
+    id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    commit_id  UUID NOT NULL REFERENCES models.commits(id) ON DELETE CASCADE,
+    element_id UUID NOT NULL,
+    payload    JSONB,
+    model_id   UUID,
+    UNIQUE (commit_id, element_id)
+);
+CREATE INDEX IF NOT EXISTS data_versions_payload_idx ON models.data_versions USING GIN (payload jsonb_path_ops);
+
+-- Every element a commit holds (element id -> the DataVersion it has at that commit)
+CREATE TABLE IF NOT EXISTS models.commit_elements (
+    commit_id  UUID NOT NULL REFERENCES models.commits(id) ON DELETE CASCADE,
+    element_id UUID NOT NULL,
+    version_id UUID NOT NULL REFERENCES models.data_versions(id) ON DELETE CASCADE,
+    PRIMARY KEY (commit_id, element_id)
+);
+CREATE INDEX IF NOT EXISTS commit_elements_version_idx ON models.commit_elements (version_id);
+
+CREATE TABLE IF NOT EXISTS models.queries (
+    id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    project_id  UUID NOT NULL REFERENCES models.project(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL DEFAULT '',
+    description TEXT,
+    alias       TEXT[] NOT NULL DEFAULT '{}',
+    query       JSONB NOT NULL,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE models.model_version ADD COLUMN IF NOT EXISTS commit_id UUID REFERENCES models.commits(id) ON DELETE SET NULL;
 
 -- Executions of the model (calcs, analyses, requirement checks, behaviors)
 CREATE TABLE IF NOT EXISTS models.run (
@@ -83,11 +142,16 @@ CREATE TABLE IF NOT EXISTS models.seed (
 pool = ConnectionPool(DATABASE_URL, kwargs={"row_factory": dict_row, "autocommit": True}, open=False, min_size=1, max_size=10)
 
 
-def init() -> None:
+def init(migrate: Callable[[Connection], None] | None = None) -> None:
+    """Create or upgrade the schema, then run ``migrate`` in one transaction (once
+    at a time across workers)."""
     pool.open(wait=True, timeout=60)
     with pool.connection() as c:
         c.execute("SELECT pg_advisory_lock(4202)")
         try:
             c.execute(SCHEMA)
+            if migrate:
+                with c.transaction():
+                    migrate(c)
         finally:
             c.execute("SELECT pg_advisory_unlock(4202)")
