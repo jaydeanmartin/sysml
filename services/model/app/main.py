@@ -305,6 +305,13 @@ DEMOS = [
             ("Architectures", "architectures.sysml", "System architectures (#SystemArchitecture) and the system instances configured from the catalog"),
         ],
     ),
+    (
+        "delivery-drones", "Delivery Drones", "Configurable multirotor parcel delivery drones",
+        [
+            ("DroneLibrary", "drone_library.sysml", "Frames, batteries, motors, propellers and payload modules, with their catalog instances"),
+            ("DroneArchitectures", "drone_architectures.sysml", "Quad, hexa and octo architectures, sizing requirements and configured drones"),
+        ],
+    ),
 ]
 
 
