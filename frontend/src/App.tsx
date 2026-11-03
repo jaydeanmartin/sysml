@@ -22,7 +22,57 @@ import type { Catalog, CatalogChange, Diagnostic, GNode, Graph, Loc, Located, Mo
 
 type Tab = "diagram" | "library" | "configurator" | "requirements" | "execute" | "analyses" | "history";
 const CATALOG_TABS: Tab[] = ["library", "configurator"];
+// [panel, label, icon, tooltip] in sidebar order
+const PANELS: [Tab, string, string, string][] = [
+  ["diagram", "Diagram", "◫", "Structure, interconnection, requirement and behavior diagrams"],
+  ["library", "Library", "▤", "Component types and their catalog instances"],
+  ["configurator", "Configurator", "⚙", "Configure system instances from catalog components"],
+  ["requirements", "Requirements", "✓", "Requirements, satisfy relations and verdicts"],
+  ["execute", "Execute", "▶", "Run calcs, analyses, actions and state machines"],
+  ["analyses", "Analyses", "ƒ", "REST analyses the model can call"],
+  ["history", "History", "⟲", "Versions and runs of the model"],
+];
+const NAV_COLLAPSED_KEY = "studio.navCollapsed";
 const EMPTY: Graph = { nodes: [], edges: [] };
+
+// ---------------------------------------------------------------- modeless editor window
+interface Rect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+interface EditorWindow {
+  floating: boolean;
+  min: boolean;
+  rect: Rect;
+}
+const EDITOR_WINDOW_KEY = "studio.editorWindow";
+const TITLE_H = 30;
+
+/** Keep a window's title bar on screen, and the window no larger than the viewport. */
+function clampRect(r: Rect): Rect {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const w = Math.min(Math.max(r.w, 320), vw);
+  const h = Math.min(Math.max(r.h, 160), vh - 8);
+  return { w, h, x: Math.min(Math.max(r.x, 80 - w), vw - 80), y: Math.min(Math.max(r.y, 0), vh - TITLE_H) };
+}
+
+function loadEditorWindow(): EditorWindow {
+  const initial: EditorWindow = {
+    floating: true,
+    min: false,
+    rect: { x: 184, y: 60, w: Math.min(680, Math.round(window.innerWidth * 0.45)), h: window.innerHeight - 110 },
+  };
+  try {
+    const got = JSON.parse(localStorage.getItem(EDITOR_WINDOW_KEY) || "null");
+    if (got && typeof got.floating === "boolean" && got.rect) return { ...initial, ...got, rect: clampRect(got.rect) };
+  } catch {
+    /* ignore a malformed setting */
+  }
+  return { ...initial, rect: clampRect(initial.rect) };
+}
 
 export default function App() {
   const [projects, setProjects] = useState<Project[]>([]);
@@ -48,12 +98,31 @@ export default function App() {
   const [toast, setToast] = useState<{ text: string; bad?: boolean } | null>(null);
   const [engine, setEngine] = useState<string | null>(null);
   const [leftPct, setLeftPct] = useState(42);
+  const [navCollapsed, setNavCollapsed] = useState(() => localStorage.getItem(NAV_COLLAPSED_KEY) === "1");
+  useEffect(() => localStorage.setItem(NAV_COLLAPSED_KEY, navCollapsed ? "1" : "0"), [navCollapsed]);
   const [newModel, setNewModel] = useState<{ name: string; template: ModelTemplate } | null>(null);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [catalogLoading, setCatalogLoading] = useState(false);
   const [catalogError, setCatalogError] = useState<string | null>(null);
   const [catalogTick, setCatalogTick] = useState(0);
   const editor = useRef<EditorHandle>(null);
+  const [editorWin, setEditorWin] = useState<EditorWindow>(loadEditorWindow);
+  useEffect(() => localStorage.setItem(EDITOR_WINDOW_KEY, JSON.stringify(editorWin)), [editorWin]);
+  useEffect(() => {
+    const fit = () => setEditorWin((w) => ({ ...w, rect: clampRect(w.rect) }));
+    window.addEventListener("resize", fit);
+    return () => window.removeEventListener("resize", fit);
+  }, []);
+  /** Restore a minimized editor window. */
+  const showEditor = useCallback(() => setEditorWin((w) => (w.min ? { ...w, min: false } : w)), []);
+  /** Select a location's text in the editor; restore the editor first unless told not to. */
+  const revealText = useCallback(
+    (loc: Loc, restore = true) => {
+      if (restore) showEditor();
+      window.setTimeout(() => editor.current?.reveal(loc), 0);
+    },
+    [showEditor]
+  );
   const abort = useRef<AbortController | null>(null);
   const pendingReveal = useRef<{ modelId: string; loc: Loc; id: string } | null>(null);
 
@@ -97,7 +166,7 @@ export default function App() {
     if (reveal?.modelId === id) {
       pendingReveal.current = null;
       setSelected(reveal.id);
-      window.setTimeout(() => editor.current?.reveal(reveal.loc), 30);
+      window.setTimeout(() => revealText(reveal.loc), 30);
     }
     const reqs = await api.requirements(id).catch(() => []);
     const v: Record<string, string> = {};
@@ -241,7 +310,7 @@ export default function App() {
     if (!el.modelId || !el.loc) return;
     if (el.modelId === modelId) {
       select(el.id, false);
-      editor.current?.reveal(el.loc);
+      revealText(el.loc);
       return;
     }
     if (!(await ensureSaved())) return;
@@ -252,7 +321,7 @@ export default function App() {
   const select = (id: string | null, reveal = true) => {
     setSelected(id);
     const n = id ? nodesById.get(id) : undefined;
-    if (reveal && n?.loc) editor.current?.reveal(n.loc);
+    if (reveal && n?.loc) revealText(n.loc, false); // a diagram click does not restore a minimized editor
   };
 
   const onCursor = (line: number, col: number) => {
@@ -270,6 +339,7 @@ export default function App() {
   };
 
   const insert = (text: string, where: "cursor" | "packageEnd" = "packageEnd") => {
+    showEditor();
     editor.current?.insert(text, where);
     flash("Inserted into the model — the diagram updates as you edit.");
   };
@@ -320,7 +390,8 @@ export default function App() {
 
   const onDividerDown = (e: React.MouseEvent) => {
     e.preventDefault();
-    const move = (ev: MouseEvent) => setLeftPct(Math.min(75, Math.max(20, (ev.clientX / window.innerWidth) * 100)));
+    const area = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
+    const move = (ev: MouseEvent) => setLeftPct(Math.min(75, Math.max(20, ((ev.clientX - area.left) / area.width) * 100)));
     const up = () => {
       window.removeEventListener("mousemove", move);
       window.removeEventListener("mouseup", up);
@@ -328,6 +399,74 @@ export default function App() {
     window.addEventListener("mousemove", move);
     window.addEventListener("mouseup", up);
   };
+
+  /** Move (title bar) or resize (corner) the floating editor; the rest of the UI stays usable. */
+  const onWindowDrag = (e: React.MouseEvent, mode: "move" | "resize") => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const start = { mx: e.clientX, my: e.clientY, ...editorWin.rect };
+    document.body.classList.add(mode === "move" ? "dragging" : "resizing");
+    const move = (ev: MouseEvent) => {
+      const dx = ev.clientX - start.mx;
+      const dy = ev.clientY - start.my;
+      const r = mode === "move" ? { ...start, x: start.x + dx, y: start.y + dy } : { ...start, w: start.w + dx, h: start.h + dy };
+      setEditorWin((w) => ({ ...w, rect: clampRect(r) }));
+    };
+    const up = () => {
+      document.body.classList.remove("dragging", "resizing");
+      window.removeEventListener("mousemove", move);
+      window.removeEventListener("mouseup", up);
+    };
+    window.addEventListener("mousemove", move);
+    window.addEventListener("mouseup", up);
+  };
+  const editorVisible = !editorWin.min;
+  const modelName = models.find((m) => m.id === modelId)?.name || "";
+
+  const editorPane = (
+    <>
+      <div className="toolbar">
+        {SNIPPETS.map((s) => (
+          <button key={s.label} title={s.title} onClick={() => insert(s.text, "cursor")}>
+            {s.label}
+          </button>
+        ))}
+        <button title="Capture a requirement" onClick={() => setTab("requirements")}>
+          + Requirement
+        </button>
+        {!editorWin.floating && (
+          <button className="push-right" title="Float the editor in a movable window over the workspace" onClick={() => setEditorWin((w) => ({ ...w, floating: true, min: false }))}>
+            ⧉ Float
+          </button>
+        )}
+      </div>
+      <Editor
+        ref={editor}
+        value={source}
+        onChange={setSource}
+        diagnostics={diagnostics}
+        selected={sel?.loc || null}
+        activeLines={activeLocs}
+        onCursor={onCursor}
+        onSave={save}
+      />
+      <div className="problems">
+        {diagnostics.length === 0 ? (
+          <div className="muted small">No problems. {parseMs != null && `Interpreted in ${parseMs} ms.`}</div>
+        ) : (
+          diagnostics.map((d, i) => (
+            <div key={i} className={`problem ${d.severity}`} onClick={() => revealText({ file: null, line: d.line, column: d.column, endLine: d.line, endColumn: d.column + 1 })}>
+              <span className="sev">{d.severity === "error" ? "✗" : "⚠"}</span>
+              <span className="mono small">
+                {d.line}:{d.column}
+              </span>{" "}
+              {d.message} {d.code && <span className="muted small">[{d.code}]</span>}
+            </div>
+          ))
+        )}
+      </div>
+    </>
+  );
 
   return (
     <div className="app">
@@ -371,160 +510,137 @@ export default function App() {
         </button>
       </header>
 
-      <main className="split" style={{ gridTemplateColumns: `${leftPct}% 6px 1fr` }}>
-        <section className="left">
-          <div className="toolbar">
-            {SNIPPETS.map((s) => (
-              <button key={s.label} title={s.title} onClick={() => insert(s.text, "cursor")}>
-                {s.label}
-              </button>
-            ))}
-            <button title="Capture a requirement" onClick={() => setTab("requirements")}>
-              + Requirement
+      <div className="workspace">
+        <nav className={`sidenav${navCollapsed ? " collapsed" : ""}`} aria-label="Panels">
+          {PANELS.map(([k, label, icon, tip]) => (
+            <button key={k} className={tab === k ? "on" : ""} title={navCollapsed ? `${label}: ${tip}` : tip} aria-current={tab === k ? "page" : undefined} onClick={() => setTab(k)}>
+              <span className="nav-icon">{icon}</span>
+              <span className="nav-label">{label}</span>
             </button>
-          </div>
-          <Editor
-            ref={editor}
-            value={source}
-            onChange={setSource}
-            diagnostics={diagnostics}
-            selected={sel?.loc || null}
-            activeLines={activeLocs}
-            onCursor={onCursor}
-            onSave={save}
-          />
-          <div className="problems">
-            {diagnostics.length === 0 ? (
-              <div className="muted small">No problems. {parseMs != null && `Interpreted in ${parseMs} ms.`}</div>
-            ) : (
-              diagnostics.map((d, i) => (
-                <div key={i} className={`problem ${d.severity}`} onClick={() => editor.current?.reveal({ file: null, line: d.line, column: d.column, endLine: d.line, endColumn: d.column + 1 })}>
-                  <span className="sev">{d.severity === "error" ? "✗" : "⚠"}</span>
-                  <span className="mono small">
-                    {d.line}:{d.column}
-                  </span>{" "}
-                  {d.message} {d.code && <span className="muted small">[{d.code}]</span>}
-                </div>
-              ))
-            )}
-          </div>
-        </section>
-        <div className="divider" onMouseDown={onDividerDown} />
-        <section className="right">
-          <nav className="tabs">
-            {(
-              [
-                ["diagram", "Diagram"],
-                ["library", "Library"],
-                ["configurator", "Configurator"],
-                ["requirements", "Requirements"],
-                ["execute", "Execute"],
-                ["analyses", "Analyses"],
-                ["history", "History"],
-              ] as [Tab, string][]
-            ).map(([k, l]) => (
-              <button key={k} className={tab === k ? "on" : ""} onClick={() => setTab(k)}>
-                {l}
-              </button>
-            ))}
-          </nav>
-          {tab === "diagram" && (
-            <div className="diagram-wrap">
-              <div className="diagram-bar">
-                <div className="seg">
-                  {(
-                    [
-                      ["structure", "Structure"],
-                      ["interconnection", "Interconnection"],
-                      ["requirements", "Requirements"],
-                      ["behavior", "Behavior"],
-                    ] as [ViewKind, string][]
-                  ).map(([k, l]) => (
-                    <button key={k} className={view === k ? "on" : ""} onClick={() => setView(k)}>
-                      {l}
-                    </button>
-                  ))}
-                </div>
-                {view === "interconnection" && candidates.length > 0 && (
-                  <select value={ibdContext || ""} onChange={(e) => setIbdContext(e.target.value)}>
-                    {candidates.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.kind} {c.name}
-                      </option>
-                    ))}
-                  </select>
-                )}
-                {active.size > 0 && <span className="pill warn">▶ execution trace</span>}
-              </div>
-              <Diagram model={diagram} selected={selected} active={active} onSelect={(id) => select(id)} fitKey={`${modelId}:${view}:${ibdContext}`} />
-              {sel && (
-                <div className="inspector">
-                  <div className="muted small">
-                    {sel.kind} {sel.tool && <span className="pill warn">⚡ REST {sel.tool.toolName}</span>}
-                  </div>
-                  <div className="strong mono">{sel.qualifiedName || sel.name}</div>
-                  <code className="block">{sel.header}</code>
-                  {sel.doc && <div className="small">{sel.doc}</div>}
-                  {sel.loc && <div className="muted small">line {sel.loc.line}–{sel.loc.endLine}</div>}
-                </div>
-              )}
-            </div>
-          )}
-          {tab === "requirements" && modelId && (
-            <RequirementsPanel
-              modelId={modelId}
-              refreshKey={`${saved?.headVersion}:${lastRun?.id}`}
-              dirty={dirty}
-              graph={graph}
-              onReveal={(loc, id) => {
-                setSelected(id);
-                editor.current?.reveal(loc);
-              }}
-              onInsert={(t) => insert(t)}
-              onCheckAll={async () => {
-                await runModel({ kind: "satisfy" });
-              }}
-            />
-          )}
-          {tab === "execute" && (
-            <ExecutePanel
-              graph={graph}
-              busy={running}
-              lastRun={lastRun}
-              onRun={runModel}
-              onActive={(ids, focus) => {
-                setActive(new Set(ids));
-                if (focus) setSelected(focus);
-              }}
-            />
-          )}
-          {catalogTab && projectId && (
+          ))}
+          <div className="nav-sep" />
+          <button
+            className={editorVisible ? "on-soft" : ""}
+            title={editorVisible ? "Minimize the SysML v2 text editor" : "Show the SysML v2 text editor"}
+            aria-pressed={editorVisible}
+            onClick={() => setEditorWin((w) => ({ ...w, min: !w.min }))}
+          >
+            <span className="nav-icon">✎</span>
+            <span className="nav-label">Editor{dirty && " ●"}</span>
+          </button>
+          <div className="grow" />
+          <button className="nav-collapse" title={navCollapsed ? "Expand the sidebar" : "Collapse the sidebar"} onClick={() => setNavCollapsed((c) => !c)}>
+            <span className="nav-icon">{navCollapsed ? "»" : "«"}</span>
+            <span className="nav-label">Collapse</span>
+          </button>
+        </nav>
+        <main className="split" style={{ gridTemplateColumns: editorWin.floating || editorWin.min ? "1fr" : `${leftPct}% 6px 1fr` }}>
+          {!editorWin.floating && (
             <>
-              {tab === "library" ? (
-                <LibraryPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
-              ) : (
-                <ConfiguratorPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
-              )}
+              {/* hidden rather than unmounted, so the editor keeps its cursor and undo history */}
+              <section className="left" style={editorWin.min ? { display: "none" } : undefined}>{editorPane}</section>
+              {!editorWin.min && <div className="divider" onMouseDown={onDividerDown} />}
             </>
           )}
-          {tab === "analyses" && <AnalysesPanel onInsert={(t) => insert(t)} />}
-          {tab === "history" && modelId && projectId && (
-            <HistoryPanel
-              projectId={projectId}
-              modelId={modelId}
-              refreshKey={`${saved?.headVersion}:${lastRun?.id}`}
-              onRestore={(src, v) => {
-                setSource(src);
-                flash(`Loaded version ${v} into the editor — save to make it the head version.`);
-              }}
-              onShowRun={(r) => {
-                setLastRun(r);
-                setTab("execute");
-              }}
-            />
-          )}
-        </section>
-      </main>
+          <section className="right">
+            {tab === "diagram" && (
+              <div className="diagram-wrap">
+                <div className="diagram-bar">
+                  <div className="seg">
+                    {(
+                      [
+                        ["structure", "Structure"],
+                        ["interconnection", "Interconnection"],
+                        ["requirements", "Requirements"],
+                        ["behavior", "Behavior"],
+                      ] as [ViewKind, string][]
+                    ).map(([k, l]) => (
+                      <button key={k} className={view === k ? "on" : ""} onClick={() => setView(k)}>
+                        {l}
+                      </button>
+                    ))}
+                  </div>
+                  {view === "interconnection" && candidates.length > 0 && (
+                    <select value={ibdContext || ""} onChange={(e) => setIbdContext(e.target.value)}>
+                      {candidates.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.kind} {c.name}
+                        </option>
+                      ))}
+                    </select>
+                  )}
+                  {active.size > 0 && <span className="pill warn">▶ execution trace</span>}
+                </div>
+                <Diagram model={diagram} selected={selected} active={active} onSelect={(id) => select(id)} fitKey={`${modelId}:${view}:${ibdContext}`} />
+                {sel && (
+                  <div className="inspector">
+                    <div className="muted small">
+                      {sel.kind} {sel.tool && <span className="pill warn">⚡ REST {sel.tool.toolName}</span>}
+                    </div>
+                    <div className="strong mono">{sel.qualifiedName || sel.name}</div>
+                    <code className="block">{sel.header}</code>
+                    {sel.doc && <div className="small">{sel.doc}</div>}
+                    {sel.loc && <div className="muted small">line {sel.loc.line}–{sel.loc.endLine}</div>}
+                  </div>
+                )}
+              </div>
+            )}
+            {tab === "requirements" && modelId && (
+              <RequirementsPanel
+                modelId={modelId}
+                refreshKey={`${saved?.headVersion}:${lastRun?.id}`}
+                dirty={dirty}
+                graph={graph}
+                onReveal={(loc, id) => {
+                  setSelected(id);
+                  revealText(loc);
+                }}
+                onInsert={(t) => insert(t)}
+                onCheckAll={async () => {
+                  await runModel({ kind: "satisfy" });
+                }}
+              />
+            )}
+            {tab === "execute" && (
+              <ExecutePanel
+                graph={graph}
+                busy={running}
+                lastRun={lastRun}
+                onRun={runModel}
+                onActive={(ids, focus) => {
+                  setActive(new Set(ids));
+                  if (focus) setSelected(focus);
+                }}
+              />
+            )}
+            {catalogTab && projectId && (
+              <>
+                {tab === "library" ? (
+                  <LibraryPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
+                ) : (
+                  <ConfiguratorPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
+                )}
+              </>
+            )}
+            {tab === "analyses" && <AnalysesPanel onInsert={(t) => insert(t)} />}
+            {tab === "history" && modelId && projectId && (
+              <HistoryPanel
+                projectId={projectId}
+                modelId={modelId}
+                refreshKey={`${saved?.headVersion}:${lastRun?.id}`}
+                onRestore={(src, v) => {
+                  setSource(src);
+                  flash(`Loaded version ${v} into the editor — save to make it the head version.`);
+                }}
+                onShowRun={(r) => {
+                  setLastRun(r);
+                  setTab("execute");
+                }}
+              />
+            )}
+          </section>
+        </main>
+      </div>
 
       <footer className="statusbar">
         <span>{engine ? `Interpreter: OpenMBEE OpenSysML ${engine.replace("sysml ", "")}` : "Interpreter offline"}</span>
@@ -533,6 +649,34 @@ export default function App() {
         <span className="grow" />
         <span>{dirty ? "● unsaved changes" : "all changes saved"}</span>
       </footer>
+
+      {editorWin.floating && (
+        <div
+          className={`float-win${editorWin.min ? " min" : ""}`}
+          style={{ left: editorWin.rect.x, top: editorWin.rect.y, width: editorWin.rect.w, height: editorWin.min ? undefined : editorWin.rect.h }}
+          role="dialog"
+          aria-modal="false"
+          aria-label="SysML v2 text editor"
+        >
+          <div className="float-title" onMouseDown={(e) => onWindowDrag(e, "move")} onDoubleClick={() => setEditorWin((w) => ({ ...w, min: !w.min }))}>
+            <span className="strong">SysML v2 text</span>
+            <span className="muted small ellipsis">
+              {modelName}
+              {dirty && " ●"}
+              {errors.length > 0 && ` · ${errors.length} error${errors.length > 1 ? "s" : ""}`}
+            </span>
+            <span className="grow" />
+            <button className="icon" title={editorWin.min ? "Restore" : "Minimize"} onMouseDown={(e) => e.stopPropagation()} onClick={() => setEditorWin((w) => ({ ...w, min: !w.min }))}>
+              {editorWin.min ? "▢" : "–"}
+            </button>
+            <button className="icon" title="Dock the editor beside the workspace" onMouseDown={(e) => e.stopPropagation()} onClick={() => setEditorWin((w) => ({ ...w, floating: false, min: false }))}>
+              ⇤
+            </button>
+          </div>
+          <div className="float-body">{editorPane}</div>
+          {!editorWin.min && <div className="float-resize" title="Resize" onMouseDown={(e) => onWindowDrag(e, "resize")} />}
+        </div>
+      )}
 
       {toast && <div className={`toast${toast.bad ? " bad" : ""}`}>{toast.text}</div>}
 

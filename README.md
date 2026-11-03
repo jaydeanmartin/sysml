@@ -43,19 +43,19 @@ On first start the model service creates three demo projects:
 - **Product Line** has a component library ([`examples/component_library.sysml`](examples/component_library.sysml)) and system architectures with configured system instances ([`examples/architectures.sysml`](examples/architectures.sysml)).
 - **Delivery Drones** is a configurable parcel delivery drone. Its library ([`examples/drone_library.sysml`](examples/drone_library.sysml)) has frames from 450 to 1600 mm, six batteries, four motors, four propellers, and parcel boxes and winches carrying 1 to 15 kg. The quad, hexa and octo architectures ([`examples/drone_architectures.sysml`](examples/drone_architectures.sysml)) set the number of rotors through the multiplicity of the `motors` and `propellers` slots (`part :>> motors[6];`). Each architecture derives takeoff mass, thrust-to-weight, hover power, endurance and propeller-tip clearance from the parts chosen. Six requirement defs check every drone. Of the six configured drones, `parcel`, `regional` and `heavyLift` pass every check. `courier`, `parcelLongRange` and `regionalLiIon` each fail one or two, for different reasons.
 
-Things to try in the UI:
+Things to try in the UI. The left sidebar opens each panel; **«** collapses it to icons. Its **Editor** item shows or minimizes the text editor.
 
-1. **Edit the text.** The model is re-interpreted about 0.5 s after you stop typing. Diagnostics appear in the gutter and the problems list, and the diagrams update. You can switch between four views: Structure, Interconnection (with ports and connections), Requirements (with satisfy relations and verdicts) and Behavior (actions and states).
+1. **Edit the text.** The model is re-interpreted about 0.5 s after you stop typing. Diagnostics appear in the gutter and the problems list, and the diagrams update. You can switch between four views: Structure, Interconnection (with ports and connections), Requirements (with satisfy relations and verdicts) and Behavior (actions and states). The editor is a modeless window floating over the workspace, so the diagram and the other panels stay usable while it is open. Drag its title bar to move it, drag the bottom-right corner to resize it, and double-click the title bar or press **–** to minimize it. **⇤** docks it beside the workspace and **⧉ Float** floats it again. The browser remembers its position and size.
 2. **Click a box, a compartment line or a port.** The editor selects that element's source. Moving the cursor in the editor selects the element in the diagram.
-3. **Requirements tab.** Capture a requirement with the form; the SysML text is inserted for you. **Check all satisfy relations** runs every `satisfy`. `sedan.mass` and `sedan.range` are computed by REST analyses during that check.
-4. **Execute tab.** Run `VehicleModel::sedanCooling`. This analysis case calls the external `thermalSolver` endpoint. The tab lists every REST call made during the run. Running `VehicleModel::Drive` or `VehicleStates` plays back the execution trace in both the diagram and the editor.
-5. **Analyses tab.** Register an external endpoint or a formula. **Insert SysML binding** generates a `calc def` with the `ToolExecution` metadata that binds to it.
-6. **Library tab** (Product Line or Delivery Drones project). Browse the component types and their catalog instances. **+ New instance** creates an instance from a form with one field per attribute. You can also edit or delete instances and declare new components.
-7. **Configurator tab.** Pick a system architecture and fill each slot with a compatible catalog instance, then create the system instance. **Evaluate & check requirements** computes every system instance's derived attributes and checks each applicable requirement def against it, in one run.
+3. **Requirements panel.** Capture a requirement with the form; the SysML text is inserted for you. **Check all satisfy relations** runs every `satisfy`. `sedan.mass` and `sedan.range` are computed by REST analyses during that check.
+4. **Execute panel.** Run `VehicleModel::sedanCooling`. This analysis case calls the external `thermalSolver` endpoint. The panel lists every REST call made during the run. Running `VehicleModel::Drive` or `VehicleStates` plays back the execution trace in both the diagram and the editor.
+5. **Analyses panel.** Register an external endpoint or a formula. **Insert SysML binding** generates a `calc def` with the `ToolExecution` metadata that binds to it.
+6. **Library panel** (Product Line or Delivery Drones project). Browse the component types and their catalog instances. **+ New instance** creates an instance from a form with one field per attribute. You can also edit or delete instances and declare new components.
+7. **Configurator panel.** Pick a system architecture and fill each slot with a compatible catalog instance, then create the system instance. **Evaluate & check requirements** computes every system instance's derived attributes and checks each applicable requirement def against it, in one run.
 
 ## Component library and system configuration
 
-Everything is plain SysML v2 text in the project's models. The Library and Configurator tabs find components and architectures by two metadata tags, and they edit the text for you:
+Everything is plain SysML v2 text in the project's models. The Library and Configurator panels find components and architectures by two metadata tags, and they edit the text for you:
 
 ```sysml
 metadata def Component;
@@ -225,7 +225,7 @@ export DATABASE_URL=postgresql://sysml:sysml@localhost:5432/sysml
 (cd frontend && npm install && npm run dev)   # http://localhost:5173 (Vite proxies /api/*)
 ```
 
-The seeded `thermalSolver` points at `http://demo-external:8010`. Outside Docker, run `services/demo-external` and change the URL in the Analyses tab.
+The seeded `thermalSolver` points at `http://demo-external:8010`. Outside Docker, run `services/demo-external` and change the URL in the Analyses panel.
 
 ## Tests
 
