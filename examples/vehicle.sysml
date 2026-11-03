@@ -70,41 +70,6 @@ package VehicleModel {
         return range : Real[1]  { @ToolVariable { name = "range"; } }
     }
 
-    // Performed by an *external* REST service registered in the analysis registry
-    action def CoolingSolve {
-        metadata ToolExecution { toolName = "thermalSolver"; uri = "analysis://thermalSolver"; }
-        in power : PowerValue[1]         { @ToolVariable { name = "power"; } }
-        in area : AreaValue[1]           { @ToolVariable { name = "area"; } }
-        in ambient : TemperatureValue[1] { @ToolVariable { name = "ambient"; } }
-        out tMax : TemperatureValue[1]   { @ToolVariable { name = "tMax"; } }
-        out margin : TemperatureValue[1] { @ToolVariable { name = "margin"; } }
-    }
-
-    requirement def CoolingRequirement {
-        doc /* The radiator shall keep coolant at or below 393 K (120 degC). */
-        subject vehicle : Vehicle;
-        in attribute tMax : TemperatureValue;
-        require constraint { tMax <= 393.15 [SI::K] }
-    }
-
-    analysis def CoolingAnalysis {
-        subject vehicle : Vehicle;
-        in attribute heatLoad : PowerValue = 3000 [SI::W];
-        in attribute radiatorArea : AreaValue = 1.5 [SI::'m²'];
-        in attribute ambient : TemperatureValue = 308.15 [SI::K];
-        action solve : CoolingSolve {
-            in power = heatLoad;
-            in area = radiatorArea;
-            in ambient = ambient;
-        }
-        return tMax : TemperatureValue[1] = solve.tMax;
-        out margin : TemperatureValue[1] = solve.margin;
-        objective coolingHeld : CoolingRequirement {
-            subject = vehicle;
-            in tMax = solve.tMax;
-        }
-    }
-
     // A plain SysML calc, evaluated by OpenSysML itself
     calc def FuelEnergy {
         in litres : Real;
@@ -140,8 +105,6 @@ package VehicleModel {
         attribute :>> mass = MassRollup(engine.mass, tank.mass, transmission.mass) + 1100 [SI::kg];
         attribute :>> range = RangeEstimate(tank.capacity, engine.efficiency, mass);
     }
-
-    analysis sedanCooling : CoolingAnalysis { subject vehicle = sedan; }
 
     requirement sedanMass : MassRequirement { subject vehicle = sedan; }
     requirement sedanRange : RangeRequirement { subject vehicle = sedan; }

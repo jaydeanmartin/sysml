@@ -1,36 +1,5 @@
 [
   {
-    "name": "thermalSolver",
-    "kind": "external",
-    "description": "Radiator temperature from heat load (demo external REST service).",
-    "endpointUrl": "http://demo-external:8010/thermal",
-    "inputs": [
-      {
-        "name": "power",
-        "unit": "W"
-      },
-      {
-        "name": "area",
-        "unit": "m**2"
-      },
-      {
-        "name": "ambient",
-        "unit": "K"
-      }
-    ],
-    "outputs": [
-      {
-        "name": "tMax",
-        "unit": "K"
-      },
-      {
-        "name": "margin",
-        "unit": "K"
-      }
-    ],
-    "timeoutSeconds": 20
-  },
-  {
     "name": "missionSimulator",
     "kind": "external",
     "description": "Time-stepped mission simulation of a battery multirotor: energy drawn, percent of the pack, mission time, state of charge (mission simulator service).",

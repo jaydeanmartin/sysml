@@ -18,7 +18,6 @@ flowchart LR
   MS -->|parse / execute| IS
   IS -->|spawns| OS[["OpenSysML sysml CLI<br/>(Go, SysML v2 + KerML)"]]
   OS -->|ToolExecution → bridge.py| AS
-  AS -->|kind=external| EXT["any REST endpoint<br/>(demo-external :8010)"]
   AS -->|kind=external| SIM["mission simulator :8011<br/>(missionSimulator)"]
   MS -->|invoke missionSimulator| AS
   MS --- PG[(PostgreSQL<br/>schemas: models, analysis)]
@@ -33,7 +32,6 @@ flowchart LR
 | `analysis` | 8003 | Registry of analyses (`builtin` Python functions, `formula`, `external` REST endpoints). `POST /analyses/{name}/invoke` runs one. Every call is logged together with the id of the run that made it. |
 | `geometry` | 8004 | Generates 3-D geometry of a system instance as binary glTF 2.0, from the component instances in its slots and their attribute values. It reads the project's catalog from the model service, so it stores nothing. |
 | `mission-sim` | 8011 | Mission simulator, an external analysis registered as `missionSimulator`. It flies a mission step by step and returns the battery energy drawn, its share of the pack, the mission time, the state of charge over time, and whether the reserve holds. |
-| `demo-external` | 8010 | An example third-party REST analysis (a thermal solver). It is registered in the registry as `thermalSolver`. |
 | `postgres` | 5432 | PostgreSQL 16. The model and analysis services each own a schema. |
 
 ## Quick start
@@ -53,7 +51,7 @@ Things to try in the UI. The left sidebar opens each panel; **«** collapses it 
 1. **Edit the text.** The model is re-interpreted about 0.5 s after you stop typing. Diagnostics appear in the gutter and the problems list, and the diagrams update. You can switch between four views: Structure, Interconnection (with ports and connections), Requirements (with satisfy relations and verdicts) and Behavior (actions and states). The editor is a modeless window floating over the workspace, so the diagram and the other panels stay usable while it is open. Drag its title bar to move it, drag the bottom-right corner to resize it, and double-click the title bar or press **–** to minimize it. **⇤** docks it beside the workspace and **⧉ Float** floats it again. The browser remembers its position and size.
 2. **Click a box, a compartment line or a port.** The editor selects that element's source. Moving the cursor in the editor selects the element in the diagram.
 3. **Requirements panel.** Capture a requirement with the form; the SysML text is inserted for you. **Check all satisfy relations** runs every `satisfy`. `sedan.mass` and `sedan.range` are computed by REST analyses during that check.
-4. **Execute panel.** Run `VehicleModel::sedanCooling`. This analysis case calls the external `thermalSolver` endpoint. The panel lists every REST call made during the run. Running `VehicleModel::Drive` or `VehicleStates` plays back the execution trace in both the diagram and the editor.
+4. **Execute panel.** Run `VehicleModel::Drive` or `VehicleStates` to play back the execution trace in both the diagram and the editor. A run that calls REST analyses (such as checking `sedanMass`, whose mass comes from the `massRollup` analysis) lists every call it made.
 5. **Analyses panel.** Register an external endpoint or a formula. **Insert SysML binding** generates a `calc def` with the `ToolExecution` metadata that binds to it.
 6. **Library panel** (Delivery Drones project). Browse the component types, the behaviors and their catalog instances. **+ New instance** creates an instance from a form with one field per attribute, or one per parameter for a behavior. A behavior instance is incomplete until every parameter is set (see `cruiseSport`). You can also edit or delete instances and declare new components and behaviors.
 7. **Configurator panel.** Pick a system architecture. Fill each part slot with a compatible catalog instance, and choose a complete behavior instance for every behavior the architecture performs. Then create the system instance. **Evaluate & check requirements** computes every system instance's derived attributes and checks each applicable requirement def against it, in one run.
@@ -220,7 +218,7 @@ What happens on every execution:
 
 The URL of an external endpoint comes from the registry, not from the model text, so a model cannot make the platform call arbitrary hosts.
 
-An external endpoint receives `POST {"toolName", "uri", "inputs", "runId"}` and must return either `{"outputs": {name: {"value", "unit"?}}}` or `{"error": "..."}`. See [`services/demo-external/app.py`](services/demo-external/app.py).
+An external endpoint receives `POST {"toolName", "uri", "inputs", "runId"}` and must return either `{"outputs": {name: {"value", "unit"?}}}` or `{"error": "..."}`. See [`services/mission-sim/app/main.py`](services/mission-sim/app/main.py), the mission simulator, registered as `missionSimulator`.
 
 To add a Python analysis, decorate a function in [`services/analysis/app/builtins.py`](services/analysis/app/builtins.py):
 
@@ -333,7 +331,7 @@ export DATABASE_URL=postgresql://sysml:sysml@localhost:5432/sysml
 (cd frontend && npm install && npm run dev)   # http://localhost:5173 (Vite proxies /api/*)
 ```
 
-The seeded `thermalSolver` points at `http://demo-external:8010` and `missionSimulator` at `http://mission-sim:8011/simulate`. Outside Docker, run those services and change the URLs in the Analyses panel.
+The seeded `missionSimulator` points at `http://mission-sim:8011/simulate`. Outside Docker, run that service and change the URL in the Analyses panel.
 
 ## Tests
 

@@ -28,12 +28,6 @@ services:
     ports:
       - "8003:8003"
 
-  # Example third-party REST analysis, registered as kind=external (thermalSolver)
-  demo-external:
-    build: ./services/demo-external
-    ports:
-      - "8010:8010"
-
   # SysML v2 interpreter: OpenMBEE OpenSysML behind a REST API
   interpreter:
     build:
