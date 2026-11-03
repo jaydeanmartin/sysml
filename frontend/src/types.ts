@@ -291,6 +291,8 @@ export interface Architecture extends Located {
   requirements: string[];
   /** ... that also take mission totals as in parameters */
   missionRequirements: string[];
+  /** mission simulations this architecture can be the subject of */
+  simulations: string[];
 }
 
 export interface CatalogRequirement extends Located {
@@ -329,6 +331,22 @@ export interface FlownMission {
   totals: Record<string, number | null>;
   /** mission requirement -> verdict */
   verdicts: Record<string, "holds" | "fails" | "error">;
+  /** mission requirement -> how it was verified */
+  verification: Record<string, Verification>;
+  /** the mission simulation's run, when one was needed (its outputs without timeline and steps) */
+  simulation?: SimulationRun;
+}
+
+/** how a mission requirement was verified for one system instance */
+export interface Verification {
+  /** simulation: with the results of the mission simulation that verifies it;
+   *  evaluation: with the mission totals, summed over the flown steps */
+  method: "simulation" | "evaluation";
+  /** the simulation def */
+  by: string | null;
+  /** the requirement's parameters, as supplied */
+  values?: Record<string, number | null>;
+  note?: string;
 }
 
 export interface MissionEvaluation {
@@ -356,6 +374,8 @@ export interface Catalog {
   missionTypes: MissionType[];
   missions: Mission[];
   requirements: CatalogRequirement[];
+  /** defs bound to an external analysis (ToolExecution) with a system subject */
+  simulations: MissionSimulationDef[];
   packages: { qualifiedName: string; modelId: string | null; modelName: string | null; loc: Loc | null }[];
   tags: Record<string, string>;
   diagnostics: Diagnostic[];
@@ -438,4 +458,64 @@ export interface GeometryInfo {
   metrics: Record<string, number | null>;
   warnings: string[];
   parts: GeometryPart[];
+}
+
+/** what the mission simulator (an external analysis) returns for one system */
+export interface SimulationOutputs {
+  /** Wh drawn from the battery */
+  energyUsed: number;
+  /** of the battery's total energy */
+  energyPercent: number;
+  energyDelivered: number;
+  /** s (up to depletion) */
+  missionTime: number;
+  endStateOfCharge: number;
+  reserveMargin: number;
+  peakPower: number;
+  averagePower: number;
+  completed: boolean;
+  feasible: boolean;
+  limitingStep: string;
+  issues: string[];
+  flownSteps: { name: string; behavior: string; start: number; duration: number; power: number; mass: number; energy: number; startSoc: number; endSoc: number }[];
+  timeline: { t: number; soc: number; power: number; step: string | null }[];
+}
+
+export interface SimulationRun {
+  /** why the system cannot fly the mission */
+  problems: string[];
+  simulation?: string;
+  toolName?: string;
+  /** the simulation def's inputs, evaluated for the system */
+  inputs?: Record<string, number | boolean | string | null>;
+  outputs?: SimulationOutputs;
+  units?: Record<string, string>;
+  error?: string;
+  /** requirements the simulation verifies -> verdict */
+  verdicts?: Record<string, "holds" | "fails" | "error">;
+  verification?: Record<string, Verification>;
+}
+
+export interface SimulationResult {
+  mission: string;
+  /** the analysis service logs the simulator calls under this run id */
+  runId: string;
+  /** system instance -> result */
+  systems: Record<string, SimulationRun>;
+  errors: string[];
+}
+
+export interface SimulationRequest {
+  missionType: string;
+  mission: string | null;
+  draft: StepRequest[] | null;
+  systems: string[] | null;
+}
+
+export interface MissionSimulationDef extends Located {
+  toolName: string;
+  subject: string;
+  subjectTypeId: string;
+  /** in parameters with a value: evaluated with a system instance as subject */
+  inputs: { name: string; value: string }[];
 }

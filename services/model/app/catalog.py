@@ -44,7 +44,13 @@ Nothing here is stored outside the models. The conventions are plain SysML v2:
   type (see ``flown_step``);
 * a **mission requirement** is a requirement def with ``in`` parameters: it is
   checked with a system instance as subject and the totals of the mission as
-  flown by that system as arguments.
+  flown by that system as arguments;
+* a **mission simulation** is a def bound to an external analysis
+  (``ToolExecution`` metadata) with a subject: its ``in`` parameters with a
+  value are evaluated with a system instance as subject and sent to the
+  analysis, together with the flown steps of a mission. Its ``out`` parameters
+  name the results it relies on; as a verification def, the requirements its
+  objective verifies are checked with those results (by parameter name).
 
 The catalog is computed from one parse of every model of a project, so the IDs
 and qualified names line up across models. Creating or editing an instance or a
@@ -232,6 +238,30 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]]) -> dict
             params = [c["name"] for c in idx.children.get(n["id"], []) if c["kind"] == "param" and c.get("direction") == "in"]
             requirements.append({**located(n), "subject": subject["name"], "subjectTypeId": subject["typeId"], "params": params})
 
+    # ---------------------------------------------------------- mission simulations: tool-bound defs with a subject
+    simulations = []
+    for n in graph["nodes"]:
+        if not (n.get("tool") or {}).get("toolName") or not n["kind"].endswith(" def"):
+            continue
+        subject = next((c for c in idx.children.get(n["id"], []) if c["kind"] == "subject"), None)
+        if not subject or not subject.get("typeId"):
+            continue
+        inputs = [
+            {"name": c["name"], "value": c["value"]}
+            for c in idx.children.get(n["id"], [])
+            if c["kind"] == "param" and c.get("direction") == "in" and c.get("value")
+        ]
+        outputs = [c["name"] for c in idx.children.get(n["id"], []) if c["kind"] == "param" and c.get("direction") == "out"]
+        verifies = [_qn(idx.nodes[e["target"]]) for e in graph["edges"] if e["kind"] == "verify" and e["source"] == n["id"] and e["target"] in idx.nodes]
+        simulations.append(
+            {
+                **located(n), "toolName": n["tool"]["toolName"], "subject": subject["name"], "subjectTypeId": subject["typeId"],
+                "inputs": inputs, "outputs": outputs, "verifies": verifies,
+            }
+        )
+    for r in requirements:
+        r["verifiedBy"] = [s["qualifiedName"] for s in simulations if r["qualifiedName"] in s["verifies"]]
+
     # ---------------------------------------------------------- architectures
     architectures = []
     for n in part_defs:
@@ -289,6 +319,8 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]]) -> dict
                 "missionRequirements": [
                     r["qualifiedName"] for r in requirements if r["subjectTypeId"] in idx.ancestors(n["id"]) and r["params"]
                 ],
+                # mission simulations this architecture can be the subject of
+                "simulations": [s["qualifiedName"] for s in simulations if s["subjectTypeId"] in idx.ancestors(n["id"])],
             }
         )
     arch_by_id = {a["id"]: a for a in architectures}
@@ -364,6 +396,7 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]]) -> dict
         "missionTypes": mission_types,
         "missions": missions,
         "requirements": requirements,
+        "simulations": simulations,
         "packages": packages,
         "tags": tags,
     }

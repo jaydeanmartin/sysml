@@ -257,6 +257,7 @@ package DroneLibrary {
         attribute duration : Real;              // s
         attribute distance : Real default = 0;  // m flown
         attribute hoverTime : Real = duration * powerFactor;   // s of hover with the same energy
+        attribute releasesPayload : Boolean default = false;   // the drone is lighter after this step
     }
     abstract #Behavior action def Takeoff :> DroneBehavior {
         doc /* Vertical climb to cruise altitude. */
@@ -282,6 +283,7 @@ package DroneLibrary {
         in winchSpeed : Real;                   // m/s
         attribute depth : Real;                 // m
         attribute :>> duration = 2 * depth / winchSpeed + 10;   // 10 s to release
+        attribute :>> releasesPayload = true;
     }
     abstract #Behavior action def Land :> DroneBehavior {
         doc /* Vertical descent and touchdown. */
@@ -293,6 +295,7 @@ package DroneLibrary {
     abstract #Behavior action def GroundRelease :> DroneBehavior {
         doc /* Release the parcel on the ground with the motors idle. */
         in :>> powerFactor;
+        attribute :>> releasesPayload = true;
     }
 
     // ---------------------------------------------------------- behavior catalog

@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import type { CatalogChange, Component, FlownMission, Mission, MissionEvaluation, MissionType, StepRequest } from "../types";
+import type { CatalogChange, Component, FlownMission, Mission, MissionEvaluation, MissionType, StepRequest, Verification } from "../types";
 import { NAME_RE, errorText, partText, placeholder, ref, short, type CatalogPanelProps } from "./catalogUtil";
+import { MissionSimulation } from "./MissionSimulation";
 
 interface Draft {
   name: string;
@@ -243,6 +244,7 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
   const flyerQn = flyer && draftResults?.[flyer] ? flyer : Object.keys(draftResults || {}).find((k) => !draftResults![k].problems.length) || null;
   const flight = flyerQn ? draftResults?.[flyerQn] : undefined;
   const timeTotal = totals[0];
+  const reqDocs = Object.fromEntries(catalog.requirements.map((r) => [r.qualifiedName, r.doc || ""]));
 
   return (
     <div className="panel lib">
@@ -440,13 +442,7 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
                 </div>
 
                 <code className="block">{preview}</code>
-                {draftResults && (
-                  <div className="chips">
-                    {Object.entries(draftResults).map(([qn, r]) => (
-                      <FlightPill key={qn} name={short(qn)} r={r} />
-                    ))}
-                  </div>
-                )}
+                {draftResults && <VerificationTable results={draftResults} docs={reqDocs} />}
                 <div className="row-end">
                   {incomplete && <span className="hint">Every step needs all its quantities.</span>}
                   {!incomplete && !draftResults && draft.steps.length > 0 && <span className="hint">Evaluate to fly it with every system instance.</span>}
@@ -456,6 +452,20 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
                   </button>
                 </div>
               </div>
+            )}
+
+            {draft && catalog.simulations.length > 0 && (
+              <MissionSimulation
+                projectId={projectId}
+                missionType={mtype.qualifiedName}
+                mission={current && !stepsChanged ? current.qualifiedName : null}
+                draft={current && !stepsChanged ? null : clean(draft.steps)}
+                label={current && !stepsChanged ? current.name : "draft"}
+                systems={catalog.configurations}
+                ensureSaved={ensureSaved}
+                refreshKey={catalog}
+                disabled={!draft.steps.length || incomplete}
+              />
             )}
 
             <div className="section-title row-between">
@@ -521,7 +531,7 @@ function FlightPill({ r, name }: { r: FlownMission; name?: string }) {
   const verdicts = Object.entries(r.verdicts);
   const title = r.problems.length
     ? r.problems.join("\n")
-    : [...Object.entries(r.totals).map(([t, v]) => `${t} ${fmt(v)}`), ...verdicts.map(([q, v]) => `${short(q)}: ${v}`)].join("\n");
+    : [...Object.entries(r.totals).map(([t, v]) => `${t} ${fmt(v)}`), ...verdicts.map(([q, v]) => `${short(q)}: ${v} (${how(r.verification?.[q])})`)].join("\n");
   if (r.problems.length)
     return (
       <span className="pill" title={title}>
@@ -534,6 +544,64 @@ function FlightPill({ r, name }: { r: FlownMission; name?: string }) {
     <span className={`pill ${bad.length ? "bad" : "ok"}`} title={title}>
       {name ? `${bad.length ? "✗" : "✓"} ${name}` : label}
     </span>
+  );
+}
+
+/** "simulated by MissionSimulation: energyPercent 75.2" */
+function how(v?: Verification): string {
+  if (!v) return "";
+  const vals = Object.entries(v.values || {}).map(([k, x]) => `${k} ${fmt(x)}`).join(", ");
+  const by = v.method === "simulation" ? `simulated by ${short(v.by)}` : "estimated from the mission totals";
+  return [by, v.note || vals].filter(Boolean).join(": ");
+}
+
+/** each system's verdict on each mission requirement, and how it was verified */
+function VerificationTable({ results, docs }: { results: Record<string, FlownMission>; docs: Record<string, string> }) {
+  const reqs = [...new Set(Object.values(results).flatMap((r) => Object.keys(r.verification || {})))];
+  if (!reqs.length) return null;
+  const method = (q: string) => Object.values(results).find((r) => r.verification?.[q])?.verification[q];
+  return (
+    <div className="table-scroll">
+      <table className="table compact">
+        <thead>
+          <tr>
+            <th>Requirement verification</th>
+            {reqs.map((q) => {
+              const m = method(q);
+              return (
+                <th key={q} title={docs[q]}>
+                  {short(q)}
+                  <div className="muted small">{m?.method === "simulation" ? `◆ simulated · ${short(m.by)}` : "○ estimated · mission totals"}</div>
+                </th>
+              );
+            })}
+          </tr>
+        </thead>
+        <tbody>
+          {Object.entries(results).map(([qn, r]) => (
+            <tr key={qn}>
+              <td className="mono strong">{short(qn)}</td>
+              {r.problems.length ? (
+                <td colSpan={reqs.length} className="muted small">
+                  ⊘ {r.problems.join("; ")}
+                </td>
+              ) : (
+                reqs.map((q) => {
+                  const v = r.verdicts[q];
+                  const ver = r.verification?.[q];
+                  return (
+                    <td key={q} title={how(ver)}>
+                      {v ? <span className={`pill ${v === "holds" ? "ok" : "bad"}`}>{v === "holds" ? "✓ holds" : v === "fails" ? "✗ fails" : "? error"}</span> : <span className="muted">—</span>}
+                      <div className="mono small muted">{ver?.note || Object.entries(ver?.values || {}).map(([k, x]) => `${k} ${fmt(x)}`).join(", ")}</div>
+                    </td>
+                  );
+                })
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

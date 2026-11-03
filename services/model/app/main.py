@@ -16,6 +16,7 @@ import re
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
@@ -968,92 +969,305 @@ def _number(v: str | None) -> float | None:
     return float(m.group(0)) if m else None
 
 
+class _Flights:
+    """Missions of a mission type flown by every system instance that performs
+    behaviors, as a scratch package: each step a system can fly becomes an action
+    that subsets the system's performed behavior and the mission step (see
+    ``catalog.flown_step``), so the behavior's attributes evaluate with both.
+
+    ``flights[mission key][system qn]`` is ``{"problems": [...], "steps": [{"name",
+    "behavior", "performedBy", "var"}]}``; the key is the mission's qualified name,
+    or ``draft`` for unsaved steps."""
+
+    SCRATCH = "MissionCheck__"
+
+    def __init__(self, cat: dict[str, Any], mtype: dict[str, Any], draft: list[StepIn] | None, only: str | None = None):
+        self.cat = cat
+        comps = {c["qualifiedName"]: c for c in cat["components"]}
+        ancestors: dict[str, set[str]] = {}
+
+        def lineage(qn: str) -> set[str]:  # the behavior and every behavior it specializes
+            if qn not in ancestors:
+                ancestors[qn] = {qn}.union(*(lineage(g) for g in comps.get(qn, {}).get("specializes", []) if g in comps))
+            return ancestors[qn]
+
+        missions = {
+            m["qualifiedName"]: (m["qualifiedName"], m["steps"])
+            for m in cat["missions"]
+            if m["missionType"] == mtype["qualifiedName"] and (only is None or m["qualifiedName"] == only)
+        }
+        self.lines = [f"package {self.SCRATCH} {{", "    private import ScalarValues::*;"]
+        if draft is not None:
+            _check_steps(cat, draft)
+            names = catalog.step_names([s.behavior for s in draft])
+            draft_steps = [(n, s.behavior, s.values) for n, s in zip(names, draft)]
+            self.lines += [f"    {l}" for l in catalog.mission_text("draft", mtype["qualifiedName"], draft_steps)]
+            missions["draft"] = (f"{self.SCRATCH}::draft", [{"name": n, "behavior": b} for n, b, _ in draft_steps])
+        self.archs = {a["id"]: a for a in cat["architectures"]}
+        self.flights: dict[str, dict[str, dict[str, Any]]] = {}
+        n = 0
+        for key, (mission_qn, steps) in missions.items():
+            self.flights[key] = {}
+            for cfg in cat["configurations"]:
+                arch = self.archs[cfg["architectureId"]]
+                if not arch["behaviors"]:
+                    continue
+                problems, flown = set(), []
+                for s in steps:
+                    slot = next((b for b in arch["behaviors"] if s["behavior"] and b["type"] in lineage(s["behavior"])), None)
+                    if not slot:
+                        problems.add(f"{arch['name']} does not perform {(s['behavior'] or '?').rsplit('::', 1)[-1]}")
+                    elif not cfg["behaviors"].get(slot["name"]):
+                        problems.add(f"no behavior chosen for {slot['name']}")
+                    else:
+                        n += 1
+                        var = f"{self.SCRATCH}::f{n}"
+                        self.lines.append("    " + catalog.flown_step(f"f{n}", f"{cfg['qualifiedName']}.{slot['name']}", f"{mission_qn}.{s['name']}"))
+                        flown.append({"name": s["name"], "behavior": s["behavior"], "performedBy": cfg["behaviors"][slot["name"]], "var": var})
+                self.flights[key][cfg["qualifiedName"]] = {"problems": sorted(problems), "steps": [] if problems else flown}
+
+    def evaluate(self, project_id: uuid.UUID, exprs: list[str]) -> tuple[dict[str, str | None], list[str]]:
+        """Evaluate expressions with the project's models and the scratch package."""
+        if not exprs:
+            return {}, []
+        rows = _project_heads(project_id)
+        files = [{"name": f"{r['name']}.sysml", "text": r["source"]} for r in rows]
+        files.append({"name": f"{self.SCRATCH}.sysml", "text": "\n".join([*self.lines, "}"]) + "\n"})
+        run = _interpreter("/execute", {"files": files, "kind": "evaluate", "expression": "\n".join(exprs), "trace": False})
+        got = {c["subject"]: (c["values"][0]["value"] if c["values"] else None) for c in run.get("checks") or []}
+        return got, run.get("errors") or []
+
+
+def _mission_checks(cat: dict[str, Any], arch: dict[str, Any], totals: list[str]) -> list[dict[str, Any]]:
+    """How each mission requirement of an architecture is checked: by the mission
+    simulation that verifies it, when one applies to the architecture and its
+    out parameters supply every parameter of the requirement; else by the
+    mission totals, when its parameters are all totals; else not at all."""
+    reqs = {r["qualifiedName"]: r for r in cat["requirements"]}
+    sims = {s["qualifiedName"]: s for s in cat["simulations"]}
+    out = []
+    for rq in arch["missionRequirements"]:
+        params = reqs[rq]["params"]
+        sim = next((q for q in arch["simulations"] if rq in sims[q]["verifies"] and set(params) <= set(sims[q]["outputs"])), None)
+        if sim:
+            out.append({"requirement": rq, "params": params, "method": "simulation", "by": sim})
+        elif set(params) <= set(totals):
+            out.append({"requirement": rq, "params": params, "method": "evaluation", "by": None})
+    return out
+
+
+def _literal(x: float) -> str:
+    return format(x, ".6f")
+
+
+def _run_missions(
+    project_id: uuid.UUID, cat: dict[str, Any], mtype: dict[str, Any], draft: list[StepIn] | None,
+    only: str | None = None, systems: list[str] | None = None, simulate_all: bool = False,
+) -> tuple[dict[str, dict[str, Any]], list[str], str]:
+    """Fly missions with every system instance and check the mission requirements.
+
+    One evaluate run gives each flown step's totals, the requirements checked by
+    totals, and the inputs of the simulations needed (those verifying a
+    requirement, or all with ``simulate_all``). The simulations are then called
+    through the analysis service (logged under the returned run id), and a
+    second evaluate run checks the requirements they verify with their results.
+    Returns ``(results[mission key][system qn], errors, run id)``."""
+    totals = [t["name"] for t in mtype["totals"]]
+    fl = _Flights(cat, mtype, draft, only)
+    sims = {s["qualifiedName"]: s for s in cat["simulations"]}
+    comps = {c["qualifiedName"]: c for c in cat["components"]}
+    cfgs = {c["qualifiedName"]: c for c in cat["configurations"]}
+    out: dict[str, dict[str, Any]] = {}
+    exprs: list[str] = []
+    plans: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def static_expr(rq: str, cfg_qn: str, params: list[str], steps: list[dict[str, Any]]) -> str:
+        args = [" + ".join(f"{s['var']}.{p}" for s in steps) or "0" for p in params]
+        return f"{rq}({', '.join([cfg_qn, *args])})"
+
+    for key, per_cfg in fl.flights.items():
+        out[key] = {}
+        for cfg_qn, f in per_cfg.items():
+            if systems is not None and cfg_qn not in systems:
+                continue
+            arch = fl.archs[cfgs[cfg_qn]["architectureId"]]
+            checks = _mission_checks(cat, arch, totals)
+            res: dict[str, Any] = {
+                "problems": f["problems"], "steps": [], "totals": {}, "verdicts": {},
+                "verification": {c["requirement"]: {"method": c["method"], "by": c["by"]} for c in checks},
+                "checks": checks,
+            }
+            out[key][cfg_qn] = res
+            if f["problems"]:
+                continue
+            exprs += [f"{s['var']}.{t}" for s in f["steps"] for t in totals]
+            exprs += [static_expr(c["requirement"], cfg_qn, c["params"], f["steps"]) for c in checks if c["method"] == "evaluation"]
+            sim_q = next((c["by"] for c in checks if c["method"] == "simulation"), None) or (arch["simulations"][0] if simulate_all and arch["simulations"] else None)
+            if not sim_q:
+                if simulate_all:
+                    res["simulation"] = {"error": f"no mission simulation applies to {arch['name']}"}
+                continue
+            sim = sims[sim_q]
+            subject = re.compile(rf"(?<![\w:.]){re.escape(sim['subject'])}\b")
+            inputs = {i["name"]: subject.sub(cfg_qn, i["value"]) for i in sim["inputs"]}
+            feats = [[a["name"] for a in comps[s["behavior"]]["attributes"]] + [p["name"] for p in comps[s["behavior"]]["params"]] for s in f["steps"]]
+            exprs += list(inputs.values()) + [f"{s['var']}.{x}" for s, fs in zip(f["steps"], feats) for x in fs]
+            plans[(key, cfg_qn)] = {"sim": sim, "inputs": inputs, "steps": list(zip(f["steps"], feats))}
+    got, errors = fl.evaluate(project_id, exprs)
+
+    # totals and the requirements checked by them
+    for key, per_cfg in out.items():
+        for cfg_qn, res in per_cfg.items():
+            f = fl.flights[key][cfg_qn]
+            if f["problems"]:
+                continue
+            res["steps"] = [
+                {"name": s["name"], "performedBy": s["performedBy"], "values": {t: _number(got.get(f"{s['var']}.{t}")) for t in totals}}
+                for s in f["steps"]
+            ]
+            vals = {t: [s["values"][t] for s in res["steps"]] for t in totals}
+            res["totals"] = {t: None if None in v else sum(v) for t, v in vals.items()}
+            for c in res["checks"]:
+                if c["method"] == "evaluation":
+                    v = got.get(static_expr(c["requirement"], cfg_qn, c["params"], f["steps"]))
+                    res["verdicts"][c["requirement"]] = "holds" if v == "true" else "fails" if v == "false" else "error"
+                    res["verification"][c["requirement"]]["values"] = {p: res["totals"].get(p) for p in c["params"]}
+
+    # the simulations, through the analysis service
+    run_id = str(uuid.uuid4())
+
+    def call(item: tuple[tuple[str, str], dict[str, Any]]) -> tuple[tuple[str, str], dict[str, Any]]:
+        (key, cfg_qn), p = item
+        sim = p["sim"]
+        inputs: dict[str, Any] = {name: _value(got.get(expr)) for name, expr in p["inputs"].items()}
+        res: dict[str, Any] = {"simulation": sim["qualifiedName"], "toolName": sim["toolName"], "inputs": inputs}
+        missing = [name for name, v in inputs.items() if v is None]
+        if missing:
+            return (key, cfg_qn), res | {"error": f"could not evaluate {', '.join(missing)}"}
+        steps = [
+            {
+                "name": s["name"],
+                "behavior": s["behavior"].rsplit("::", 1)[-1],
+                "performedBy": s["performedBy"].rsplit("::", 1)[-1],
+                **{x: _value(got.get(f"{s['var']}.{x}")) for x in fs},
+            }
+            for s, fs in p["steps"]
+        ]
+        try:
+            r = httpx.post(
+                f"{ANALYSIS_URL}/analyses/{sim['toolName']}/invoke",
+                json={"toolName": sim["toolName"], "uri": f"analysis://{sim['toolName']}", "inputs": {**inputs, "steps": steps}, "runId": run_id},
+                timeout=60,
+            )
+        except httpx.HTTPError as exc:
+            return (key, cfg_qn), res | {"error": f"analysis service unreachable: {exc}"}
+        if r.status_code >= 400:
+            try:
+                detail = r.json().get("detail")
+            except ValueError:
+                detail = r.text[:300]
+            return (key, cfg_qn), res | {"error": str(detail)}
+        outs = r.json().get("outputs") or {}
+        return (key, cfg_qn), res | {
+            "outputs": {k: (v.get("value") if isinstance(v, dict) else v) for k, v in outs.items()},
+            "units": {k: v["unit"] for k, v in outs.items() if isinstance(v, dict) and v.get("unit")},
+        }
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for (key, cfg_qn), sres in pool.map(call, plans.items()):
+            out[key][cfg_qn]["simulation"] = sres
+
+    # the requirements the simulations verify, checked with their results
+    pending: list[tuple[dict[str, Any], str, str]] = []
+    for per_cfg in out.values():
+        for cfg_qn, res in per_cfg.items():
+            for c in res["checks"]:
+                if c["method"] != "simulation" or res["problems"]:
+                    continue
+                o = (res.get("simulation") or {}).get("outputs") or {}
+                if o.get("completed") is False:
+                    # results of a flight that never finished verify nothing
+                    res["verdicts"][c["requirement"]] = "fails"
+                    res["verification"][c["requirement"]]["note"] = "the simulated mission did not complete"
+                    continue
+                vals = [o.get(p) for p in c["params"]]
+                if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in vals):
+                    res["verdicts"][c["requirement"]] = "error"
+                    continue
+                res["verification"][c["requirement"]]["values"] = dict(zip(c["params"], vals))
+                expr = f"{c['requirement']}({', '.join([cfg_qn, *(_literal(x) for x in vals)])})"
+                pending.append((res, c["requirement"], expr))
+    if pending:
+        got2, errors2 = fl.evaluate(project_id, [e for _, _, e in pending])
+        errors += errors2
+        for res, rq, expr in pending:
+            v = got2.get(expr)
+            res["verdicts"][rq] = "holds" if v == "true" else "fails" if v == "false" else "error"
+    for per_cfg in out.values():
+        for res in per_cfg.values():
+            res.pop("checks")
+    return out, errors, run_id
+
+
 @app.post("/projects/{project_id}/catalog/missions/evaluate")
 def evaluate_missions(project_id: uuid.UUID, body: MissionCheckIn) -> dict[str, Any]:
     """Fly every mission of a mission type (and an unsaved draft) with every system
-    instance that performs behaviors: each step is flown with the behavior the
-    system performs for the step's behavior type, the mission's totals are summed
-    over the flown steps, and each mission requirement whose parameters are all
-    totals is checked as Req(system, total, ...). One evaluate run in all."""
-    cat, sources = _project_catalog(project_id)
+    instance that performs behaviors and check the mission requirements: those a
+    mission simulation verifies with its results, the others with the mission
+    totals (see ``_mission_checks``). Each result says how each requirement was
+    verified; the simulation summary leaves out its timeline and steps."""
+    cat, _ = _project_catalog(project_id)
     mtype = _find(cat["missionTypes"], body.missionType, "mission type")
-    totals = [t["name"] for t in mtype["totals"]]
-    comps = {c["qualifiedName"]: c for c in cat["components"]}
-    ancestors: dict[str, set[str]] = {}
-
-    def lineage(qn: str) -> set[str]:  # the behavior and every behavior it specializes
-        if qn not in ancestors:
-            ancestors[qn] = {qn}.union(*(lineage(g) for g in comps.get(qn, {}).get("specializes", []) if g in comps))
-        return ancestors[qn]
-
-    scratch = "MissionCheck__"
-    missions = {m["qualifiedName"]: (m["qualifiedName"], m["steps"]) for m in cat["missions"] if m["missionType"] == mtype["qualifiedName"]}
-    lines = [f"package {scratch} {{", "    private import ScalarValues::*;"]
-    if body.draft is not None:
-        _check_steps(cat, body.draft)
-        names = catalog.step_names([s.behavior for s in body.draft])
-        draft_steps = [(n, s.behavior, s.values) for n, s in zip(names, body.draft)]
-        lines += [f"    {l}" for l in catalog.mission_text("draft", mtype["qualifiedName"], draft_steps)]
-        missions["draft"] = (f"{scratch}::draft", [{"name": n, "behavior": b} for n, b, _ in draft_steps])
-    reqs = {r["qualifiedName"]: r for r in cat["requirements"]}
-    archs = {a["id"]: a for a in cat["architectures"]}
-
-    out: dict[str, dict[str, Any]] = {}
-    exprs: list[tuple[str, Any]] = []  # (expression, where its value goes)
-    n = 0
-    for key, (mission_qn, steps) in missions.items():
-        out[key] = {}
-        for cfg in cat["configurations"]:
-            arch = archs[cfg["architectureId"]]
-            if not arch["behaviors"]:
-                continue
-            res: dict[str, Any] = {"problems": [], "steps": [], "totals": {}, "verdicts": {}}
-            out[key][cfg["qualifiedName"]] = res
-            flown = []
-            for s in steps:
-                slot = next((b for b in arch["behaviors"] if s["behavior"] and b["type"] in lineage(s["behavior"])), None)
-                if not slot:
-                    res["problems"].append(f"{arch['name']} does not perform {(s['behavior'] or '?').rsplit('::', 1)[-1]}")
-                elif not cfg["behaviors"].get(slot["name"]):
-                    res["problems"].append(f"no behavior chosen for {slot['name']}")
-                else:
-                    n += 1
-                    flown.append(f"f{n}")
-                    lines.append("    " + catalog.flown_step(f"f{n}", f"{cfg['qualifiedName']}.{slot['name']}", f"{mission_qn}.{s['name']}"))
-                    res["steps"].append({"name": s["name"], "performedBy": cfg["behaviors"][slot["name"]], "values": {}})
-                    for t in totals:
-                        exprs.append((f"{scratch}::f{n}.{t}", (res["steps"][-1]["values"], t)))
-            res["problems"] = sorted(set(res["problems"]))
-            if res["problems"]:
-                res["steps"] = []
-                exprs[:] = [e for e in exprs if not any(e[0].startswith(f"{scratch}::{f}.") for f in flown)]
-                continue
-            for rq in arch["missionRequirements"]:
-                params = reqs[rq]["params"]
-                if all(p in totals for p in params):
-                    args = [" + ".join(f"{scratch}::{f}.{p}" for f in flown) or "0" for p in params]
-                    exprs.append((f"{rq}({', '.join([cfg['qualifiedName'], *args])})", (res["verdicts"], rq)))
-    lines.append("}")
-
-    errors: list[str] = []
-    if exprs:
-        rows = _project_heads(project_id)
-        files = [{"name": f"{r['name']}.sysml", "text": r["source"]} for r in rows] + [{"name": f"{scratch}.sysml", "text": "\n".join(lines) + "\n"}]
-        run = _interpreter("/execute", {"files": files, "kind": "evaluate", "expression": "\n".join(e for e, _ in exprs), "trace": False})
-        got = {c["subject"]: (c["values"][0]["value"] if c["values"] else None) for c in run.get("checks") or []}
-        for expr, (target, key) in exprs:
-            v = got.get(expr)
-            if target is not None and isinstance(target, dict) and key in reqs:
-                target[key] = "holds" if v == "true" else "fails" if v == "false" else "error"
-            else:
-                target[key] = _number(v)
-        errors = run.get("errors") or []
+    out, errors, run_id = _run_missions(project_id, cat, mtype, body.draft)
     for per_cfg in out.values():
         for res in per_cfg.values():
-            if not res["problems"]:
-                vals = {t: [s["values"].get(t) for s in res["steps"]] for t in totals}
-                res["totals"] = {t: None if None in v else sum(v) for t, v in vals.items()}
-    return {"missionType": mtype["qualifiedName"], "totals": totals, "missions": out, "errors": errors}
+            o = (res.get("simulation") or {}).get("outputs")
+            if o:
+                res["simulation"]["outputs"] = {k: v for k, v in o.items() if k not in ("timeline", "flownSteps")}
+    return {"missionType": mtype["qualifiedName"], "totals": [t["name"] for t in mtype["totals"]], "missions": out, "runId": run_id, "errors": errors}
+
+
+class SimulateIn(BaseModel):
+    missionType: str
+    mission: str | None = Field(None, description="qualified name of a saved mission; omit to simulate the draft")
+    draft: list[StepIn] | None = None
+    systems: list[str] | None = Field(None, description="system instances to simulate (default: every one a simulation applies to)")
+
+
+def _value(v: str | None) -> Any:
+    """An evaluated value as JSON: booleans, numbers, else the text."""
+    if v in ("true", "false"):
+        return v == "true"
+    n = _number(v)
+    return v if n is None else n
+
+
+@app.post("/projects/{project_id}/catalog/missions/simulate")
+def simulate_mission(project_id: uuid.UUID, body: SimulateIn) -> dict[str, Any]:
+    """Simulate one mission (or the draft) for every system instance that can fly
+    it and that a mission simulation applies to, and check the requirements the
+    simulation verifies with its results. The simulation def's in parameters are
+    evaluated with the system as subject, every attribute and parameter of each
+    flown step is evaluated, and the result is sent to the simulation's external
+    analysis through the analysis service (which logs the call under the
+    returned run id)."""
+    if (body.mission is None) == (body.draft is None):
+        raise HTTPException(422, "give either a mission or draft steps")
+    cat, _ = _project_catalog(project_id)
+    mtype = _find(cat["missionTypes"], body.missionType, "mission type")
+    if body.mission:
+        _find(cat["missions"], body.mission, "mission")
+    out, errors, run_id = _run_missions(project_id, cat, mtype, body.draft, only=body.mission or "", systems=body.systems, simulate_all=True)
+    key = body.mission or "draft"
+    systems = {}
+    for cfg_qn, res in out.get(key, {}).items():
+        sim = res.get("simulation") or {}
+        systems[cfg_qn] = {
+            "problems": res["problems"], **sim,
+            "verdicts": {rq: v for rq, v in res["verdicts"].items() if res["verification"][rq]["method"] == "simulation"},
+            "verification": {rq: v for rq, v in res["verification"].items() if v["method"] == "simulation"},
+        }
+    return {"mission": key, "runId": run_id, "systems": systems, "errors": errors}
 
 
 @app.delete("/projects/{project_id}/catalog/elements")

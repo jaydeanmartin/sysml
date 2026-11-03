@@ -214,3 +214,26 @@ def test_behavior_and_mission_text():
     assert catalog.flown_step("f1", "Cfg::d1.fly", "Ms::trip.fly") == "action f1 :> Cfg::d1.fly, Ms::trip.fly;"
     with pytest.raises(catalog.CatalogError):
         catalog.mission_text("x", "Delivery", [("1bad", "Fly", {})])
+
+
+def test_mission_simulations_are_tool_bound_defs_with_a_subject():
+    graph = {
+        "nodes": MISSION_GRAPH["nodes"]
+        + [
+            node("B__Sim", "verification def", "Sim", "B", tool={"toolName": "missionSimulator", "uri": "analysis://missionSimulator"}),
+            node("B__Sim__drone", "subject", "drone", "B__Sim", typeId="B__Drone"),
+            node("B__Sim__hoverPower", "param", "hoverPower", "B__Sim", direction="in", value="drone.hoverPower"),
+            node("B__Sim__note", "param", "note", "B__Sim", direction="in"),  # no value: not sent
+            node("B__Sim__duration", "param", "duration", "B__Sim", direction="out"),
+            node("B__Calc", "calc def", "Calc", "B", tool={"toolName": "rangeEstimate"}),  # no subject: not a simulation
+        ],
+        "edges": MISSION_GRAPH["edges"] + [{"id": "v1", "kind": "verify", "source": "B__Sim", "target": "B__Energy"}],
+    }
+    cat = catalog.build(graph, {"Lib.sysml": {"id": "lib", "name": "Lib"}})
+    [sim] = cat["simulations"]
+    # a verification case: what it verifies, and the results it checks them with
+    assert sim["outputs"] == ["duration"] and sim["verifies"] == ["B::Energy"]
+    assert cat["requirements"][0]["verifiedBy"] == ["B::Sim"]
+    assert sim["toolName"] == "missionSimulator" and sim["subject"] == "drone"
+    assert sim["inputs"] == [{"name": "hoverPower", "value": "drone.hoverPower"}]
+    assert cat["architectures"][0]["simulations"] == ["B::Sim"]

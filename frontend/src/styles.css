@@ -328,3 +328,23 @@ body.resizing, body.resizing * { cursor: nwse-resize !important; user-select: no
 .viewer-hover { position: absolute; right: 10px; top: 8px; background: #0f172a; color: #fff; padding: 2px 8px; border-radius: 6px; pointer-events: none; }
 .viewer-error { position: absolute; left: 10px; right: 10px; bottom: 10px; margin: 0; }
 .part-list { border: 1px solid var(--line); border-radius: 8px; max-height: 220px; overflow: auto; background: var(--surface-2); }
+
+/* ------------------------------------------------------------ mission simulation chart */
+.sim { display: flex; flex-direction: column; gap: 8px; }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12px; }
+.legend-item { display: inline-flex; align-items: center; gap: 6px; cursor: default; }
+.legend-item.dim { opacity: .45; }
+.legend-key { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; }
+.chart-wrap { position: relative; }
+.chart { width: 100%; height: auto; display: block; }
+.chart .grid { stroke: var(--line); stroke-width: 1; }
+.chart .ref { stroke: var(--muted); stroke-width: 1; }
+.chart .crosshair { stroke: var(--muted); stroke-width: 1; }
+.chart .tick { fill: var(--muted); font-size: 11px; }
+.chart-tip { position: absolute; top: 8px; transform: translateX(12px); background: var(--surface); border: 1px solid var(--line-strong); border-radius: 6px; padding: 6px 8px; box-shadow: 0 6px 18px rgba(15, 23, 42, .12); pointer-events: none; min-width: 200px; z-index: 2; }
+.tip-row { display: grid; grid-template-columns: 14px auto 60px 1fr; gap: 6px; align-items: center; }
+.share { display: flex; align-items: center; gap: 6px; }
+.share-bar { position: relative; width: 120px; height: 8px; border-radius: 4px; background: var(--surface-2); border: 1px solid var(--line); overflow: hidden; }
+.share-fill { height: 100%; background: var(--muted); border-radius: 0 4px 4px 0; }
+.share-tick { position: absolute; top: -1px; bottom: -1px; width: 1px; background: var(--text, #0f172a); }
+td.nowrap { white-space: nowrap; }

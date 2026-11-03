@@ -339,7 +339,12 @@ class GraphBuilder:
             elif t == "SatisfyRequirementUsage":
                 self._satisfy_edge(el, "satisfy")
             elif t == "VerifyRequirementUsage" or (
-                t == "RequirementUsage" and el.get("sysx:endForm") == "verify"
+                t == "RequirementUsage"
+                and (
+                    el.get("sysx:endForm") == "verify"
+                    # `verify requirement r : ReqDef;` in a verification objective
+                    or (self.by_id.get(_ref(el.get("owningRelationship")) or "") or {}).get("@type") == "RequirementVerificationMembership"
+                )
             ):
                 self._satisfy_edge(el, "verify")
 
@@ -533,6 +538,9 @@ class GraphBuilder:
         if rs:
             req = _ref(rs.get("referencedFeature"))
         req = req or _ref(el.get("subsets")) or _ref(el.get("satisfiedRequirement"))
+        if kind == "verify" and req not in self.nodes:
+            # a verified requirement declared by its definition: the edge goes to the def
+            req = next((r for r in _refs(el.get("type")) if r in self.nodes), req)
         by = _ref(el.get("subject")) or _ref(el.get("satisfyingFeature"))
         if kind == "verify":
             by = self._context(el)

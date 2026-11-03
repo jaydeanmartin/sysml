@@ -4,16 +4,146 @@
     "kind": "external",
     "description": "Radiator temperature from heat load (demo external REST service).",
     "endpointUrl": "http://demo-external:8010/thermal",
-    "inputs": [{"name": "power", "unit": "W"}, {"name": "area", "unit": "m**2"}, {"name": "ambient", "unit": "K"}],
-    "outputs": [{"name": "tMax", "unit": "K"}, {"name": "margin", "unit": "K"}],
+    "inputs": [
+      {
+        "name": "power",
+        "unit": "W"
+      },
+      {
+        "name": "area",
+        "unit": "m**2"
+      },
+      {
+        "name": "ambient",
+        "unit": "K"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "tMax",
+        "unit": "K"
+      },
+      {
+        "name": "margin",
+        "unit": "K"
+      }
+    ],
     "timeoutSeconds": 20
+  },
+  {
+    "name": "missionSimulator",
+    "kind": "external",
+    "description": "Time-stepped mission simulation of a battery multirotor: energy drawn, percent of the pack, mission time, state of charge (mission simulator service).",
+    "endpointUrl": "http://mission-sim:8011/simulate",
+    "inputs": [
+      {
+        "name": "steps",
+        "description": "flown steps: name, behavior, duration (s), powerFactor, releasesPayload"
+      },
+      {
+        "name": "hoverPower",
+        "unit": "W"
+      },
+      {
+        "name": "takeoffMass",
+        "unit": "kg"
+      },
+      {
+        "name": "payloadMass",
+        "unit": "kg"
+      },
+      {
+        "name": "batteryEnergy",
+        "unit": "Wh"
+      },
+      {
+        "name": "batteryMaxPower",
+        "unit": "W"
+      },
+      {
+        "name": "reserve",
+        "description": "fraction of the pack kept back"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "energyUsed",
+        "unit": "Wh"
+      },
+      {
+        "name": "energyPercent",
+        "unit": "%"
+      },
+      {
+        "name": "energyDelivered",
+        "unit": "Wh"
+      },
+      {
+        "name": "missionTime",
+        "unit": "s"
+      },
+      {
+        "name": "endStateOfCharge",
+        "unit": "%"
+      },
+      {
+        "name": "reserveMargin",
+        "unit": "%"
+      },
+      {
+        "name": "peakPower",
+        "unit": "W"
+      },
+      {
+        "name": "averagePower",
+        "unit": "W"
+      },
+      {
+        "name": "completed"
+      },
+      {
+        "name": "feasible"
+      },
+      {
+        "name": "limitingStep"
+      },
+      {
+        "name": "issues"
+      },
+      {
+        "name": "flownSteps"
+      },
+      {
+        "name": "timeline"
+      }
+    ],
+    "timeoutSeconds": 30
   },
   {
     "name": "fuelCost",
     "kind": "formula",
     "description": "Yearly fuel cost from range, tank capacity and fuel price.",
-    "inputs": [{"name": "kmPerYear"}, {"name": "capacity"}, {"name": "range"}, {"name": "pricePerLitre"}],
-    "outputs": [{"name": "cost"}],
-    "formulas": {"cost": "kmPerYear / range * capacity * pricePerLitre"}
+    "inputs": [
+      {
+        "name": "kmPerYear"
+      },
+      {
+        "name": "capacity"
+      },
+      {
+        "name": "range"
+      },
+      {
+        "name": "pricePerLitre"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "cost"
+      }
+    ],
+    "formulas": {
+      "cost": "kmPerYear / range * capacity * pricePerLitre"
+    }
   }
 ]

@@ -187,3 +187,18 @@ def test_requirement_def_evaluates_against_a_configured_system():
     values = {c["subject"]: c["values"][0]["value"] for c in r["checks"]}
     assert values[f"{cfg}.mass"] == "1500 [SI::kg]"
     assert values[f"Architectures::RangeRequirement({cfg})"] == "false"  # 60 kWh is not enough
+
+
+def test_verification_objective_verifies_requirement_defs():
+    src = """package V {
+        private import ScalarValues::*;
+        part def Drone;
+        requirement def EnergyReq { subject d : Drone; in pct : Real; require constraint { pct <= 80 } }
+        verification def Sim {
+            subject d : Drone;
+            objective { verify requirement energy : EnergyReq; }
+        }
+    }"""
+    r = client.post("/parse", json={"files": [{"name": "V.sysml", "text": src}]}).json()
+    assert not [d for d in r["diagnostics"] if d["severity"] == "error"]
+    assert [(e["source"], e["target"]) for e in r["graph"]["edges"] if e["kind"] == "verify"] == [("V__Sim", "V__EnergyReq")]

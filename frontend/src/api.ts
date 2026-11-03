@@ -7,6 +7,8 @@ import type {
   InstanceRequest,
   MissionEvaluation,
   MissionRequest,
+  SimulationRequest,
+  SimulationResult,
   StepRequest,
   ModelTemplate,
   Invocation,
@@ -82,6 +84,8 @@ export const api = {
     call<CatalogChange>(`${M}/projects/${projectId}/catalog/configurations`, { method: "POST", json: req }),
   saveMission: (projectId: string, req: MissionRequest) =>
     call<CatalogChange>(`${M}/projects/${projectId}/catalog/missions`, { method: "POST", json: req }),
+  simulateMission: (projectId: string, req: SimulationRequest) =>
+    call<SimulationResult>(`${M}/projects/${projectId}/catalog/missions/simulate`, { method: "POST", json: req }),
   evaluateMissions: (projectId: string, missionType: string, draft: StepRequest[] | null) =>
     call<MissionEvaluation>(`${M}/projects/${projectId}/catalog/missions/evaluate`, { method: "POST", json: { missionType, draft } }),
   deleteCatalogElement: (projectId: string, qualifiedName: string) =>
