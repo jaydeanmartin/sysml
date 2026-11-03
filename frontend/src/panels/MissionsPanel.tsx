@@ -462,6 +462,7 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
                 draft={current && !stepsChanged ? null : clean(draft.steps)}
                 label={current && !stepsChanged ? current.name : "draft"}
                 systems={catalog.configurations}
+                simulations={catalog.simulations}
                 ensureSaved={ensureSaved}
                 refreshKey={catalog}
                 disabled={!draft.steps.length || incomplete}

@@ -1062,13 +1062,15 @@ def _literal(x: float) -> str:
 
 def _run_missions(
     project_id: uuid.UUID, cat: dict[str, Any], mtype: dict[str, Any], draft: list[StepIn] | None,
-    only: str | None = None, systems: list[str] | None = None, simulate_all: bool = False,
+    only: str | None = None, systems: list[str] | None = None, simulate: str | bool = False,
 ) -> tuple[dict[str, dict[str, Any]], list[str], str]:
     """Fly missions with every system instance and check the mission requirements.
 
     One evaluate run gives each flown step's totals, the requirements checked by
-    totals, and the inputs of the simulations needed (those verifying a
-    requirement, or all with ``simulate_all``). The simulations are then called
+    totals, and the inputs of the simulations needed: those verifying a
+    requirement, plus ``simulate`` (a simulation def's qualified name, or True
+    for the first that applies to each system). Each system's results are under
+    ``simulations[simulation def]``. The simulations are then called
     through the analysis service (logged under the returned run id), and a
     second evaluate run checks the requirements they verify with their results.
     Returns ``(results[mission key][system qn], errors, run id)``."""
@@ -1095,25 +1097,34 @@ def _run_missions(
             res: dict[str, Any] = {
                 "problems": f["problems"], "steps": [], "totals": {}, "verdicts": {},
                 "verification": {c["requirement"]: {"method": c["method"], "by": c["by"]} for c in checks},
-                "checks": checks,
+                "checks": checks, "simulations": {},
             }
             out[key][cfg_qn] = res
             if f["problems"]:
                 continue
             exprs += [f"{s['var']}.{t}" for s in f["steps"] for t in totals]
             exprs += [static_expr(c["requirement"], cfg_qn, c["params"], f["steps"]) for c in checks if c["method"] == "evaluation"]
-            sim_q = next((c["by"] for c in checks if c["method"] == "simulation"), None) or (arch["simulations"][0] if simulate_all and arch["simulations"] else None)
-            if not sim_q:
-                if simulate_all:
-                    res["simulation"] = {"error": f"no mission simulation applies to {arch['name']}"}
+            needed = list(dict.fromkeys(c["by"] for c in checks if c["method"] == "simulation"))
+            if simulate is True and arch["simulations"] and arch["simulations"][0] not in needed:
+                needed.append(arch["simulations"][0])
+            elif isinstance(simulate, str) and simulate not in needed:
+                if simulate in arch["simulations"]:
+                    needed.append(simulate)
+                else:
+                    res["simulations"][simulate] = {"simulation": simulate, "error": f"{short_name(simulate)} does not apply to {arch['name']}"}
+            if simulate is True and not arch["simulations"]:
+                res["simulations"][""] = {"error": f"no mission simulation applies to {arch['name']}"}
+            if not needed:
                 continue
-            sim = sims[sim_q]
-            subject = re.compile(rf"(?<![\w:.]){re.escape(sim['subject'])}\b")
-            inputs = {i["name"]: subject.sub(cfg_qn, i["value"]) for i in sim["inputs"]}
             feats = [[a["name"] for a in comps[s["behavior"]]["attributes"]] + [p["name"] for p in comps[s["behavior"]]["params"]] for s in f["steps"]]
-            exprs += list(inputs.values()) + [f"{s['var']}.{x}" for s, fs in zip(f["steps"], feats) for x in fs]
-            plans[(key, cfg_qn)] = {"sim": sim, "inputs": inputs, "steps": list(zip(f["steps"], feats))}
-    got, errors = fl.evaluate(project_id, exprs)
+            exprs += [f"{s['var']}.{x}" for s, fs in zip(f["steps"], feats) for x in fs]
+            for sim_q in needed:
+                sim = sims[sim_q]
+                subject = re.compile(rf"(?<![\w:.]){re.escape(sim['subject'])}\b")
+                inputs = {i["name"]: subject.sub(cfg_qn, i["value"]) for i in sim["inputs"]}
+                exprs += list(inputs.values())
+                plans[(key, cfg_qn, sim_q)] = {"sim": sim, "inputs": inputs, "steps": list(zip(f["steps"], feats))}
+    got, errors = fl.evaluate(project_id, list(dict.fromkeys(exprs)))
 
     # totals and the requirements checked by them
     for key, per_cfg in out.items():
@@ -1136,14 +1147,14 @@ def _run_missions(
     # the simulations, through the analysis service
     run_id = str(uuid.uuid4())
 
-    def call(item: tuple[tuple[str, str], dict[str, Any]]) -> tuple[tuple[str, str], dict[str, Any]]:
-        (key, cfg_qn), p = item
+    def call(item: tuple[tuple[str, str, str], dict[str, Any]]) -> tuple[tuple[str, str, str], dict[str, Any]]:
+        k, p = item
         sim = p["sim"]
         inputs: dict[str, Any] = {name: _value(got.get(expr)) for name, expr in p["inputs"].items()}
         res: dict[str, Any] = {"simulation": sim["qualifiedName"], "toolName": sim["toolName"], "inputs": inputs}
         missing = [name for name, v in inputs.items() if v is None]
         if missing:
-            return (key, cfg_qn), res | {"error": f"could not evaluate {', '.join(missing)}"}
+            return k, res | {"error": f"could not evaluate {', '.join(missing)}"}
         steps = [
             {
                 "name": s["name"],
@@ -1160,22 +1171,22 @@ def _run_missions(
                 timeout=60,
             )
         except httpx.HTTPError as exc:
-            return (key, cfg_qn), res | {"error": f"analysis service unreachable: {exc}"}
+            return k, res | {"error": f"analysis service unreachable: {exc}"}
         if r.status_code >= 400:
             try:
                 detail = r.json().get("detail")
             except ValueError:
                 detail = r.text[:300]
-            return (key, cfg_qn), res | {"error": str(detail)}
+            return k, res | {"error": str(detail)}
         outs = r.json().get("outputs") or {}
-        return (key, cfg_qn), res | {
+        return k, res | {
             "outputs": {k: (v.get("value") if isinstance(v, dict) else v) for k, v in outs.items()},
             "units": {k: v["unit"] for k, v in outs.items() if isinstance(v, dict) and v.get("unit")},
         }
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        for (key, cfg_qn), sres in pool.map(call, plans.items()):
-            out[key][cfg_qn]["simulation"] = sres
+        for (key, cfg_qn, sim_q), sres in pool.map(call, plans.items()):
+            out[key][cfg_qn]["simulations"][sim_q] = sres
 
     # the requirements the simulations verify, checked with their results
     pending: list[tuple[dict[str, Any], str, str]] = []
@@ -1184,7 +1195,7 @@ def _run_missions(
             for c in res["checks"]:
                 if c["method"] != "simulation" or res["problems"]:
                     continue
-                o = (res.get("simulation") or {}).get("outputs") or {}
+                o = (res["simulations"].get(c["by"]) or {}).get("outputs") or {}
                 if o.get("completed") is False:
                     # results of a flight that never finished verify nothing
                     res["verdicts"][c["requirement"]] = "fails"
@@ -1221,14 +1232,23 @@ def evaluate_missions(project_id: uuid.UUID, body: MissionCheckIn) -> dict[str, 
     out, errors, run_id = _run_missions(project_id, cat, mtype, body.draft)
     for per_cfg in out.values():
         for res in per_cfg.values():
-            o = (res.get("simulation") or {}).get("outputs")
-            if o:
-                res["simulation"]["outputs"] = {k: v for k, v in o.items() if k not in ("timeline", "flownSteps")}
+            for sim in res["simulations"].values():
+                if sim.get("outputs"):
+                    sim["outputs"] = {k: v for k, v in sim["outputs"].items() if k not in BULKY_OUTPUTS}
     return {"missionType": mtype["qualifiedName"], "totals": [t["name"] for t in mtype["totals"]], "missions": out, "runId": run_id, "errors": errors}
+
+
+# simulation outputs left out of mission evaluations (the simulate endpoint returns them)
+BULKY_OUTPUTS = ("timeline", "flownSteps", "propellerCurves", "motorCurves")
+
+
+def short_name(qn: str) -> str:
+    return qn.rsplit("::", 1)[-1]
 
 
 class SimulateIn(BaseModel):
     missionType: str
+    simulation: str | None = Field(None, description="qualified name of the simulation def (default: the first that applies to each system)")
     mission: str | None = Field(None, description="qualified name of a saved mission; omit to simulate the draft")
     draft: list[StepIn] | None = None
     systems: list[str] | None = Field(None, description="system instances to simulate (default: every one a simulation applies to)")
@@ -1257,17 +1277,31 @@ def simulate_mission(project_id: uuid.UUID, body: SimulateIn) -> dict[str, Any]:
     mtype = _find(cat["missionTypes"], body.missionType, "mission type")
     if body.mission:
         _find(cat["missions"], body.mission, "mission")
-    out, errors, run_id = _run_missions(project_id, cat, mtype, body.draft, only=body.mission or "", systems=body.systems, simulate_all=True)
+    if body.simulation:
+        _find(cat["simulations"], body.simulation, "simulation")
+    out, errors, run_id = _run_missions(
+        project_id, cat, mtype, body.draft, only=body.mission or "", systems=body.systems, simulate=body.simulation or True,
+    )
     key = body.mission or "draft"
     systems = {}
     for cfg_qn, res in out.get(key, {}).items():
-        sim = res.get("simulation") or {}
+        # the simulation asked for, else the first that applies (a system may also
+        # have run others, to verify their requirements)
+        chosen = body.simulation or _first_simulation(cat, cfg_qn)
+        sim = res["simulations"].get(chosen or "") or res["simulations"].get("") or {}
+        by = sim.get("simulation")
         systems[cfg_qn] = {
             "problems": res["problems"], **sim,
-            "verdicts": {rq: v for rq, v in res["verdicts"].items() if res["verification"][rq]["method"] == "simulation"},
-            "verification": {rq: v for rq, v in res["verification"].items() if v["method"] == "simulation"},
+            "verdicts": {rq: v for rq, v in res["verdicts"].items() if res["verification"][rq]["by"] == by and by},
+            "verification": {rq: v for rq, v in res["verification"].items() if v["by"] == by and by},
         }
-    return {"mission": key, "runId": run_id, "systems": systems, "errors": errors}
+    return {"mission": key, "simulation": body.simulation, "runId": run_id, "systems": systems, "errors": errors}
+
+
+def _first_simulation(cat: dict[str, Any], cfg_qn: str) -> str | None:
+    cfg = next((c for c in cat["configurations"] if c["qualifiedName"] == cfg_qn), None)
+    arch = next((a for a in cat["architectures"] if cfg and a["id"] == cfg["architectureId"]), None)
+    return arch["simulations"][0] if arch and arch["simulations"] else None
 
 
 @app.delete("/projects/{project_id}/catalog/elements")

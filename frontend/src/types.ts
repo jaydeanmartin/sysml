@@ -333,8 +333,9 @@ export interface FlownMission {
   verdicts: Record<string, "holds" | "fails" | "error">;
   /** mission requirement -> how it was verified */
   verification: Record<string, Verification>;
-  /** the mission simulation's run, when one was needed (its outputs without timeline and steps) */
-  simulation?: SimulationRun;
+  /** simulation def -> its run, for each simulation that verified a requirement
+   *  (outputs without timeline, steps and curves) */
+  simulations?: Record<string, SimulationRun>;
 }
 
 /** how a mission requirement was verified for one system instance */
@@ -481,6 +482,64 @@ export interface SimulationOutputs {
   timeline: { t: number; soc: number; power: number; step: string | null }[];
 }
 
+/** a propulsion operating point, time-averaged over a step or behavior (airborne only) */
+export interface OperatingPoint {
+  J: number;
+  CT: number;
+  CP: number;
+  CQ: number;
+  /** CT / CP */
+  CTCP: number;
+  propEfficiency: number;
+  /** N of thrust per W of shaft power, per rotor */
+  thrustPerPower: number;
+  rpm: number;
+  /** N·m per rotor */
+  torque: number;
+  /** N per rotor */
+  thrust: number;
+  /** W per rotor */
+  shaftPower: number;
+  /** A per motor */
+  current: number;
+  motorVoltage: number;
+  motorEfficiency: number;
+  /** motor voltage / bus voltage */
+  throttle: number;
+  /** degrees */
+  tilt: number;
+  speed: number;
+}
+
+/** energy and power of one behavior (or step) in the dynamic simulation */
+export interface BehaviorDynamics {
+  duration: number;
+  /** Wh drawn from the pack */
+  energy: number;
+  averagePower: number;
+  peakPower: number;
+  maxThrottle: number;
+  airborne: boolean;
+  operatingPoint: OperatingPoint | null;
+}
+
+/** what the dynamic simulator (dynamicsSimulator) returns for one system */
+export interface DynamicsOutputs extends Omit<SimulationOutputs, "flownSteps" | "timeline" | "energyDelivered"> {
+  maxThrottle: number;
+  distanceFlown: number;
+  behaviors: (BehaviorDynamics & { behavior: string })[];
+  flownSteps: (BehaviorDynamics & { name: string; behavior: string; start: number; mass: number; startSoc: number; endSoc: number })[];
+  propellerCurves: { J: number; CT: number; CP: number; CQ: number; CTCP: number; efficiency: number }[];
+  /** at full throttle and the battery's nominal voltage */
+  motorCurves: { current: number; speed: number; torque: number; power: number; efficiency: number }[];
+  reference: { hoverRpm: number; propDiameter: number; airDensity: number; batteryVoltage: number; motorMaxCurrent: number };
+  timeline: { t: number; soc: number; power: number; speed: number; altitude: number; rpm: number; throttle: number; step: string | null }[];
+}
+
+export function isDynamics(o: SimulationOutputs | DynamicsOutputs | undefined): o is DynamicsOutputs {
+  return !!o && Array.isArray((o as DynamicsOutputs).behaviors);
+}
+
 export interface SimulationRun {
   /** why the system cannot fly the mission */
   problems: string[];
@@ -488,7 +547,7 @@ export interface SimulationRun {
   toolName?: string;
   /** the simulation def's inputs, evaluated for the system */
   inputs?: Record<string, number | boolean | string | null>;
-  outputs?: SimulationOutputs;
+  outputs?: SimulationOutputs | DynamicsOutputs;
   units?: Record<string, string>;
   error?: string;
   /** requirements the simulation verifies -> verdict */
@@ -498,6 +557,8 @@ export interface SimulationRun {
 
 export interface SimulationResult {
   mission: string;
+  /** the simulation def asked for (null: the first that applies to each system) */
+  simulation: string | null;
   /** the analysis service logs the simulator calls under this run id */
   runId: string;
   /** system instance -> result */
@@ -507,6 +568,8 @@ export interface SimulationResult {
 
 export interface SimulationRequest {
   missionType: string;
+  /** the simulation def to run (null: the first that applies to each system) */
+  simulation: string | null;
   mission: string | null;
   draft: StepRequest[] | null;
   systems: string[] | null;
@@ -518,4 +581,8 @@ export interface MissionSimulationDef extends Located {
   subjectTypeId: string;
   /** in parameters with a value: evaluated with a system instance as subject */
   inputs: { name: string; value: string }[];
+  /** out parameters: the results requirements are checked with */
+  outputs: string[];
+  /** requirement defs it verifies */
+  verifies: string[];
 }

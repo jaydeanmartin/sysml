@@ -18,7 +18,7 @@ flowchart LR
   MS -->|parse / execute| IS
   IS -->|spawns| OS[["OpenSysML sysml CLI<br/>(Go, SysML v2 + KerML)"]]
   OS -->|ToolExecution → bridge.py| AS
-  AS -->|kind=external| SIM["mission simulator :8011<br/>(missionSimulator)"]
+  AS -->|kind=external| SIM["mission simulator :8011<br/>(missionSimulator, dynamicsSimulator)"]
   MS -->|invoke missionSimulator| AS
   MS --- PG[(PostgreSQL<br/>schemas: models, analysis)]
   AS --- PG
@@ -31,7 +31,7 @@ flowchart LR
 | `interpreter` | 8002 | Wraps the OpenSysML binary. Endpoints: validate/parse → diagnostics + diagram graph, execute (calc, analysis case, requirement, constraint, satisfy, action, state machine, expression), and OpenSysML's own rendering (Mermaid, DOT, PlantUML, D2). |
 | `analysis` | 8003 | Registry of analyses (`builtin` Python functions, `formula`, `external` REST endpoints). `POST /analyses/{name}/invoke` runs one. Every call is logged together with the id of the run that made it. |
 | `geometry` | 8004 | Generates 3-D geometry of a system instance as binary glTF 2.0, from the component instances in its slots and their attribute values. It reads the project's catalog from the model service, so it stores nothing. |
-| `mission-sim` | 8011 | Mission simulator, an external analysis registered as `missionSimulator`. It flies a mission step by step and returns the battery energy drawn, its share of the pack, the mission time, the state of charge over time, and whether the reserve holds. |
+| `mission-sim` | 8011 | Mission simulator, an external analysis registered as `missionSimulator`. It flies a mission step by step and returns the battery energy drawn, its share of the pack, the mission time, the state of charge over time, and whether the reserve holds. The same service is also a second external analysis, `dynamicsSimulator` (`POST /dynamics`). It flies the mission through the propulsion chain and returns the energy and power of each behavior, the propeller and motor performance curves, and each behavior's operating point on them. |
 | `postgres` | 5432 | PostgreSQL 16. The model and analysis services each own a schema. |
 
 ## Quick start
@@ -55,7 +55,10 @@ Things to try in the UI. The left sidebar opens each panel; **«** collapses it 
 5. **Analyses panel.** Register an external endpoint or a formula. **Insert SysML binding** generates a `calc def` with the `ToolExecution` metadata that binds to it.
 6. **Library panel** (Delivery Drones project). Browse the component types, the behaviors and their catalog instances. **+ New instance** creates an instance from a form with one field per attribute, or one per parameter for a behavior. A behavior instance is incomplete until every parameter is set (see `cruiseSport`). You can also edit or delete instances and declare new components and behaviors.
 7. **Configurator panel.** Pick a system architecture. Fill each part slot with a compatible catalog instance, and choose a complete behavior instance for every behavior the architecture performs. Then create the system instance. **Evaluate & check requirements** computes every system instance's derived attributes and checks each applicable requirement def against it, in one run.
-8. **Missions panel.** Build a mission by clicking behaviors in the order they are performed, then set each step's quantities (distance, altitude…). Reorder steps with ↑ ↓ and change a step's behavior from its drop-down. **Evaluate & check missions** flies every mission with every drone and checks the mission requirements. The mission being edited then shows each drone's verdict, plus the step durations and a timeline for the drone you pick under **Flown by**. **▶ Simulate** runs the mission simulator for the mission being edited (saved or draft) with every drone. It shows a chart of battery charge over time with the reserve line, and a table of energy used (Wh and percent of the battery), mission time, charge left, and peak power against the battery's maximum.
+8. **Missions panel.** Build a mission by clicking behaviors in the order they are performed, then set each step's quantities (distance, altitude…). Reorder steps with ↑ ↓ and change a step's behavior from its drop-down. **Evaluate & check missions** flies every mission with every drone and checks the mission requirements. The mission being edited then shows each drone's verdict, plus the step durations and a timeline for the drone you pick under **Flown by**. **▶ Simulate** runs the mission simulator for the mission being edited (saved or draft) with every drone. It shows a chart of battery charge over time with the reserve line, and a table of energy used (Wh and percent of the battery), mission time, charge left, and peak power against the battery's maximum. When more than one simulation applies, pick one beside the title. **DynamicSimulation** also shows:
+   - the energy, average power and peak power of each behavior, for every drone;
+   - electrical power over time;
+   - for the drone you pick, small-multiple charts of the propeller's torque coefficient, thrust/power (CT/CP) and efficiency against advance ratio, and of the motor's torque, speed, shaft power and efficiency against current. Each behavior's operating point is marked on every chart, and hovering one shows its rpm, thrust, torque, current, throttle and efficiencies.
 9. **3-D panel.** Pick a system instance to see its generated geometry. Drag to orbit, scroll to zoom, and click a part to see its component instance (**Show in editor** opens its text). The exploded slider pulls the parts apart. The panel also shows the dimensions and the propeller tip clearance. Overlapping propeller discs are drawn red. The geometry is generated again after every change, so swapping a frame in the Configurator changes the drone on screen.
 
 ## Component library and system configuration
@@ -179,6 +182,15 @@ package Missions {
   **Evaluate & check missions** reports the verdict and the method for each requirement and drone. The **Verifies** column of the simulation table shows the requirements the simulation verified.
 
   `POST /projects/{id}/catalog/missions/simulate` flies the mission with every system instance the simulation applies to. It evaluates those parameters with the system as subject, and evaluates every attribute and parameter of each flown step (`duration`, `powerFactor`, `releasesPayload`…). It then calls the analysis through the analysis service, which logs each call under the returned run id. The simulator integrates power over time. Power follows the mass, so the drone is lighter after a step that `releasesPayload`, and the battery delivers it with a loss that grows with load. As a result, it can differ from the totals-based `MissionEnduranceEstimate`, which assumes full mass throughout. On `suburban`, `parcel`, `regional` and `heavyLift` fail the estimate but meet the simulated `MissionEnergyRequirement`, because the return leg is flown without the parcel.
+- **Several simulations.** A project can have more than one simulation def. Evaluation runs every simulation that verifies one of a drone's requirements and reports each under `simulations[def]`. The simulate endpoint runs the one named in `simulation`, or by default the first that applies.
+- **The dynamic simulation** ([`services/mission-sim/app/dynamics.py`](services/mission-sim/app/dynamics.py), `DroneMissions::DynamicSimulation`) assumes still air and a constant air density. It flies each step with a 0.2 s time step:
+  - **Vehicle.** A point mass follows the step's `groundSpeed` and `verticalSpeed`, accelerating at no more than 2 m/s². The rotors carry its weight, its drag `½ ρ CdA v²` and the inertia of each acceleration, and the drone tilts to point the thrust that way.
+  - **Propeller.** Each rotor's speed is solved from its curves `CT(J) = ct0 + ct1 J + ct2 J²` and `CP(J) = cp0 + cp1 J + cp2 J²`. J is the advance ratio, from the airspeed along the rotor axis. Torque is `CP ρ n² D⁵ / 2π` and efficiency is `J CT / CP`.
+  - **Motor.** A brushless DC model with `kv`, winding `resistance` and `noLoadCurrent` gives the current, voltage, efficiency and throttle.
+  - **Battery.** The voltage falls with the state of charge and sags under load.
+  - **Ground steps.** A step that is not `airborne` draws only the avionics.
+
+  The propeller, motor and frame catalogs carry these parameters, and the behaviors set the speeds (for example `Cruise` sets `groundSpeed = speed`). The simulation verifies `MissionPeakPowerRequirement` (peak electrical power, transients included, within the battery's maximum) and `ThrottleHeadroomRequirement` (at most 80 % throttle). `regionalLiIon` fails the throttle requirement at 82 %, because its 21.6 V pack sags under load. Descent is treated as hover inflow (no vortex ring state), and edgewise rotor effects are not modelled.
 - **Evaluate & check missions** calls `POST /projects/{id}/catalog/missions/evaluate`. The service writes the flown steps of every mission and drone into a scratch package. One evaluate run gives the step totals, the totals-based verdicts and the simulation inputs. The simulations then run through the analysis service, and a second evaluate run checks the requirements they verify. Nothing is stored except the analysis service's call log.
 
 ## Geometry
@@ -252,7 +264,7 @@ Interactive OpenAPI docs are served at `/docs` on each service, e.g. http://loca
 - `POST /projects/{id}/catalog/configurations` `{"architecture", "name", "assignments": {slot: instance}, "behaviors": {behavior slot: behavior instance}, "doc"?, "package"?, "replace"?}`
 - `POST /projects/{id}/catalog/components` `{"name", "package", "kind"?: "part" | "action", "specializes"?, "abstract"?, "attributes": [{name, type}], "ports": [...], "params"?: [...]}`
 - `POST /projects/{id}/catalog/missions` `{"missionType", "name", "steps": [{"behavior", "values": {quantity: expr}}], "doc"?, "package"?, "replace"?}`
-- `POST /projects/{id}/catalog/missions/simulate` `{"missionType", "mission"? | "draft"?: [steps], "systems"?: [system instance]}`: the mission simulated for each system instance (simulation inputs, the analysis' outputs, or why it cannot be flown) and the run id the analysis service logged the calls under
+- `POST /projects/{id}/catalog/missions/simulate` `{"missionType", "simulation"?: simulation def, "mission"? | "draft"?: [steps], "systems"?: [system instance]}`: the mission simulated for each system instance (simulation inputs, the analysis' outputs, or why it cannot be flown) and the run id the analysis service logged the calls under
 - `POST /projects/{id}/catalog/missions/evaluate` `{"missionType", "draft"?: [steps]}`: every mission (and the draft) flown by every system instance that performs behaviors: per-step values, totals, mission requirement verdicts with how each was verified (simulation or evaluation) and the values used, or why it cannot be flown
 - `DELETE /projects/{id}/catalog/elements?qualifiedName=`
 
@@ -331,7 +343,7 @@ export DATABASE_URL=postgresql://sysml:sysml@localhost:5432/sysml
 (cd frontend && npm install && npm run dev)   # http://localhost:5173 (Vite proxies /api/*)
 ```
 
-The seeded `missionSimulator` points at `http://mission-sim:8011/simulate`. Outside Docker, run that service and change the URL in the Analyses panel.
+The seeded `missionSimulator` points at `http://mission-sim:8011/simulate` and `dynamicsSimulator` at `http://mission-sim:8011/dynamics`. Outside Docker, run that service and change the URL in the Analyses panel.
 
 ## Tests
 

@@ -73,6 +73,58 @@ package DroneMissions {
         }
     }
 
+    // ---------------------------------------------------------- dynamic simulation
+    // A second external analysis (dynamicsSimulator) flies the mission through
+    // the propulsion chain: the vehicle's acceleration transients and drag, the
+    // propeller's thrust and power curves against the advance ratio, the
+    // motor's torque, speed and efficiency, and the battery's voltage sag.
+    // It reports the energy and power of every behavior, and verifies the
+    // requirements that need those dynamics. Still air, constant air density.
+    requirement def MissionPeakPowerRequirement {
+        doc /* Across the mission, including acceleration transients, the electrical power shall stay within the battery's maximum power. */
+        subject drone : DeliveryDrone;
+        in peakPower : Real;                    // W
+        require constraint { peakPower <= drone.battery.maxPower }
+    }
+    requirement def ThrottleHeadroomRequirement {
+        doc /* The motors shall keep a 20 % throttle margin for control in every behavior of the mission. */
+        subject drone : DeliveryDrone;
+        in maxThrottle : Real;                  // motor voltage / bus voltage
+        require constraint { maxThrottle <= 0.8 }
+    }
+    verification def DynamicSimulation {
+        doc /* Propulsion dynamics: propeller CT, CP against advance ratio, brushless motor model, drag, acceleration transients and battery sag. */
+        metadata ToolExecution { toolName = "dynamicsSimulator"; uri = "analysis://dynamicsSimulator"; }
+        subject drone : DeliveryDrone;
+        in rotorCount : Real = drone.rotorCount;
+        in takeoffMass : Real = drone.takeoffMass / (1 [SI::kg]);
+        in payloadMass : Real = drone.payloadCapacity / (1 [SI::kg]);
+        in dragArea : Real = drone.airframe.dragArea;                       // m²
+        in propDiameter : Real = drone.propellers.diameter#(1);             // in
+        in ct0 : Real = drone.propellers.ct0#(1);
+        in ct1 : Real = drone.propellers.ct1#(1);
+        in ct2 : Real = drone.propellers.ct2#(1);
+        in cp0 : Real = drone.propellers.cp0#(1);
+        in cp1 : Real = drone.propellers.cp1#(1);
+        in cp2 : Real = drone.propellers.cp2#(1);
+        in motorKv : Real = drone.motors.kv#(1);                            // rpm/V
+        in motorResistance : Real = drone.motors.resistance#(1);            // Ω
+        in motorNoLoadCurrent : Real = drone.motors.noLoadCurrent#(1);      // A
+        in motorMaxCurrent : Real = drone.motors.maxCurrent#(1);            // A
+        in batteryVoltage : Real = drone.battery.voltage;                   // V
+        in batteryEnergy : Real = drone.battery.energy;                     // Wh
+        in batteryMaxPower : Real = drone.battery.maxPower;                 // W
+        in airDensity : Real = 1.225;                                       // kg/m³, constant
+        in reserve : Real = 0.2;
+        out energyPercent : Real;                                           // % of the battery's energy used
+        out peakPower : Real;                                               // W
+        out maxThrottle : Real;
+        objective {
+            verify requirement peak : MissionPeakPowerRequirement;
+            verify requirement headroom : ThrottleHeadroomRequirement;
+        }
+    }
+
     // ---------------------------------------------------------- missions
     // Created and edited from the Missions tab. Each step is an abstract
     // behavior with its quantities set; a drone flies it with the behavior it

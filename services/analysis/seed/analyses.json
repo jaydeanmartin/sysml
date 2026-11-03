@@ -114,5 +114,161 @@
     "formulas": {
       "cost": "kmPerYear / range * capacity * pricePerLitre"
     }
+  },
+  {
+    "name": "dynamicsSimulator",
+    "kind": "external",
+    "description": "Dynamic mission simulation of a battery multirotor: propeller thrust/power curves against advance ratio, brushless motor model, drag, acceleration transients and battery sag; energy and power per behavior (mission simulator service). Still air, constant air density.",
+    "endpointUrl": "http://mission-sim:8011/dynamics",
+    "inputs": [
+      {
+        "name": "steps",
+        "description": "flown steps: name, behavior, duration (s), groundSpeed, verticalSpeed (m/s), airborne, releasesPayload"
+      },
+      {
+        "name": "rotorCount"
+      },
+      {
+        "name": "takeoffMass",
+        "unit": "kg"
+      },
+      {
+        "name": "payloadMass",
+        "unit": "kg"
+      },
+      {
+        "name": "dragArea",
+        "unit": "m2",
+        "description": "drag coefficient × frontal area"
+      },
+      {
+        "name": "propDiameter",
+        "unit": "in"
+      },
+      {
+        "name": "ct0",
+        "description": "thrust coefficient CT(J) = ct0 + ct1 J + ct2 J²"
+      },
+      {
+        "name": "ct1"
+      },
+      {
+        "name": "ct2"
+      },
+      {
+        "name": "cp0",
+        "description": "power coefficient CP(J) = cp0 + cp1 J + cp2 J²"
+      },
+      {
+        "name": "cp1"
+      },
+      {
+        "name": "cp2"
+      },
+      {
+        "name": "motorKv",
+        "unit": "rpm/V"
+      },
+      {
+        "name": "motorResistance",
+        "unit": "ohm"
+      },
+      {
+        "name": "motorNoLoadCurrent",
+        "unit": "A"
+      },
+      {
+        "name": "motorMaxCurrent",
+        "unit": "A"
+      },
+      {
+        "name": "batteryVoltage",
+        "unit": "V"
+      },
+      {
+        "name": "batteryEnergy",
+        "unit": "Wh"
+      },
+      {
+        "name": "batteryMaxPower",
+        "unit": "W"
+      },
+      {
+        "name": "airDensity",
+        "unit": "kg/m3",
+        "description": "constant"
+      },
+      {
+        "name": "reserve",
+        "description": "fraction of the pack kept back"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "energyUsed",
+        "unit": "Wh"
+      },
+      {
+        "name": "energyPercent",
+        "unit": "%"
+      },
+      {
+        "name": "missionTime",
+        "unit": "s"
+      },
+      {
+        "name": "endStateOfCharge",
+        "unit": "%"
+      },
+      {
+        "name": "reserveMargin",
+        "unit": "%"
+      },
+      {
+        "name": "peakPower",
+        "unit": "W"
+      },
+      {
+        "name": "averagePower",
+        "unit": "W"
+      },
+      {
+        "name": "maxThrottle"
+      },
+      {
+        "name": "distanceFlown",
+        "unit": "m"
+      },
+      {
+        "name": "completed"
+      },
+      {
+        "name": "feasible"
+      },
+      {
+        "name": "limitingStep"
+      },
+      {
+        "name": "issues"
+      },
+      {
+        "name": "behaviors"
+      },
+      {
+        "name": "flownSteps"
+      },
+      {
+        "name": "propellerCurves"
+      },
+      {
+        "name": "motorCurves"
+      },
+      {
+        "name": "reference"
+      },
+      {
+        "name": "timeline"
+      }
+    ]
   }
 ]

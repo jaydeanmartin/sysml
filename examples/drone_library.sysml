@@ -34,6 +34,7 @@ package DroneLibrary {
         attribute armMass : MassValue;      // per arm
         attribute wheelbase : Real;         // mm
         attribute maxTakeoffMass : MassValue;
+        attribute dragArea : Real;          // m², drag coefficient × frontal area (dynamic simulation)
         port payloadMount : MountPort;
     }
 
@@ -52,6 +53,12 @@ package DroneLibrary {
         attribute maxPower : Real;          // W (electrical, at full throttle)
         attribute efficiency : Real;        // motor and controller
         attribute maxPropDiameter : Real;   // in
+        // brushless DC model (dynamic simulation): speed, torque, power and efficiency
+        // follow from I = torque * Kv + I0 and V = speed / Kv + I * R
+        attribute kv : Real;                // rpm/V
+        attribute resistance : Real;        // Ω, winding
+        attribute noLoadCurrent : Real;     // A
+        attribute maxCurrent : Real;        // A
         port powerIn : ~PowerPort;
         port shaft : ShaftPort;
     }
@@ -62,6 +69,15 @@ package DroneLibrary {
         attribute diameter : Real;          // in
         attribute pitch : Real;             // in
         attribute thrustPerWatt : Real;     // N per W of shaft power, at hover
+        // performance curves against the advance ratio J = V / (n D) (dynamic simulation):
+        // thrust coefficient CT = ct0 + ct1 J + ct2 J², power coefficient CP = cp0 + cp1 J + cp2 J²;
+        // torque coefficient CQ = CP / 2π, efficiency η = J CT / CP
+        attribute ct0 : Real;
+        attribute ct1 : Real;
+        attribute ct2 : Real;
+        attribute cp0 : Real;
+        attribute cp1 : Real;
+        attribute cp2 : Real;
         port hub : ~ShaftPort;
     }
 
@@ -90,6 +106,7 @@ package DroneLibrary {
             attribute :>> hubMass = 0.35 [SI::kg];
             attribute :>> armMass = 0.05 [SI::kg];
             attribute :>> wheelbase = 450;
+            attribute :>> dragArea = 0.03;
             attribute :>> maxTakeoffMass = 5 [SI::kg];
         }
         part frame700 : Frame {
@@ -97,6 +114,7 @@ package DroneLibrary {
             attribute :>> hubMass = 0.8 [SI::kg];
             attribute :>> armMass = 0.12 [SI::kg];
             attribute :>> wheelbase = 700;
+            attribute :>> dragArea = 0.05;
             attribute :>> maxTakeoffMass = 12 [SI::kg];
         }
         part frame1200 : Frame {
@@ -104,6 +122,7 @@ package DroneLibrary {
             attribute :>> hubMass = 1.7 [SI::kg];
             attribute :>> armMass = 0.26 [SI::kg];
             attribute :>> wheelbase = 1200;
+            attribute :>> dragArea = 0.12;
             attribute :>> maxTakeoffMass = 22 [SI::kg];
         }
         part frame1600 : Frame {
@@ -111,6 +130,7 @@ package DroneLibrary {
             attribute :>> hubMass = 2.8 [SI::kg];
             attribute :>> armMass = 0.4 [SI::kg];
             attribute :>> wheelbase = 1600;
+            attribute :>> dragArea = 0.2;
             attribute :>> maxTakeoffMass = 35 [SI::kg];
         }
 
@@ -165,6 +185,10 @@ package DroneLibrary {
             attribute :>> maxPower = 500;
             attribute :>> efficiency = 0.8;
             attribute :>> maxPropDiameter = 11;
+            attribute :>> kv = 900;
+            attribute :>> resistance = 0.06;
+            attribute :>> noLoadCurrent = 0.9;
+            attribute :>> maxCurrent = 35;
         }
         part m4114 : Motor {
             doc /* 4114 400 KV */
@@ -172,6 +196,10 @@ package DroneLibrary {
             attribute :>> maxPower = 700;
             attribute :>> efficiency = 0.83;
             attribute :>> maxPropDiameter = 15;
+            attribute :>> kv = 400;
+            attribute :>> resistance = 0.1;
+            attribute :>> noLoadCurrent = 0.5;
+            attribute :>> maxCurrent = 32;
         }
         part m6215 : Motor {
             doc /* 6215 180 KV */
@@ -179,6 +207,10 @@ package DroneLibrary {
             attribute :>> maxPower = 1500;
             attribute :>> efficiency = 0.85;
             attribute :>> maxPropDiameter = 22;
+            attribute :>> kv = 180;
+            attribute :>> resistance = 0.07;
+            attribute :>> noLoadCurrent = 0.6;
+            attribute :>> maxCurrent = 70;
         }
         part m8318 : Motor {
             doc /* 8318 100 KV */
@@ -186,6 +218,10 @@ package DroneLibrary {
             attribute :>> maxPower = 3000;
             attribute :>> efficiency = 0.86;
             attribute :>> maxPropDiameter = 30;
+            attribute :>> kv = 100;
+            attribute :>> resistance = 0.09;
+            attribute :>> noLoadCurrent = 0.7;
+            attribute :>> maxCurrent = 70;
         }
 
         // ------------------------------------------ propellers
@@ -194,12 +230,24 @@ package DroneLibrary {
             attribute :>> diameter = 10;
             attribute :>> pitch = 4.5;
             attribute :>> thrustPerWatt = 0.085;
+            attribute :>> ct0 = 0.110;
+            attribute :>> ct1 = -0.05;
+            attribute :>> ct2 = -0.25;
+            attribute :>> cp0 = 0.045;
+            attribute :>> cp1 = 0;
+            attribute :>> cp2 = -0.06;
         }
         part prop15x5 : Propeller {
             attribute :>> mass = 0.035 [SI::kg];
             attribute :>> diameter = 15;
             attribute :>> pitch = 5;
             attribute :>> thrustPerWatt = 0.11;
+            attribute :>> ct0 = 0.105;
+            attribute :>> ct1 = -0.05;
+            attribute :>> ct2 = -0.48;
+            attribute :>> cp0 = 0.036;
+            attribute :>> cp1 = 0;
+            attribute :>> cp2 = -0.07;
         }
         part prop22x7 : Propeller {
             doc /* Carbon fibre */
@@ -207,6 +255,12 @@ package DroneLibrary {
             attribute :>> diameter = 22;
             attribute :>> pitch = 7;
             attribute :>> thrustPerWatt = 0.13;
+            attribute :>> ct0 = 0.100;
+            attribute :>> ct1 = -0.05;
+            attribute :>> ct2 = -0.50;
+            attribute :>> cp0 = 0.032;
+            attribute :>> cp1 = 0;
+            attribute :>> cp2 = -0.07;
         }
         part prop28x9 : Propeller {
             doc /* Carbon fibre */
@@ -214,6 +268,12 @@ package DroneLibrary {
             attribute :>> diameter = 28;
             attribute :>> pitch = 9;
             attribute :>> thrustPerWatt = 0.15;
+            attribute :>> ct0 = 0.100;
+            attribute :>> ct1 = -0.05;
+            attribute :>> ct2 = -0.48;
+            attribute :>> cp0 = 0.031;
+            attribute :>> cp1 = 0;
+            attribute :>> cp2 = -0.065;
         }
 
         // ------------------------------------------ payload capacities
@@ -258,6 +318,10 @@ package DroneLibrary {
         attribute distance : Real default = 0;  // m flown
         attribute hoverTime : Real = duration * powerFactor;   // s of hover with the same energy
         attribute releasesPayload : Boolean default = false;   // the drone is lighter after this step
+        // kinematics, for the dynamic simulation
+        attribute groundSpeed : Real default = 0;     // m/s horizontal
+        attribute verticalSpeed : Real default = 0;   // m/s, up is positive
+        attribute airborne : Boolean default = true;  // false: on the ground, motors stopped
     }
     abstract #Behavior action def Takeoff :> DroneBehavior {
         doc /* Vertical climb to cruise altitude. */
@@ -265,6 +329,7 @@ package DroneLibrary {
         in climbRate : Real;                    // m/s
         attribute altitude : Real;              // m
         attribute :>> duration = altitude / climbRate;
+        attribute :>> verticalSpeed = climbRate;
     }
     abstract #Behavior action def Cruise :> DroneBehavior {
         doc /* Level flight to the next waypoint. */
@@ -272,6 +337,7 @@ package DroneLibrary {
         in speed : Real;                        // m/s
         attribute :>> distance;
         attribute :>> duration = distance / speed;
+        attribute :>> groundSpeed = speed;
     }
     abstract #Behavior action def Hover :> DroneBehavior {
         doc /* Hold position, e.g. waiting for a landing zone to clear. */
@@ -291,11 +357,13 @@ package DroneLibrary {
         in descentRate : Real;                  // m/s
         attribute altitude : Real;              // m
         attribute :>> duration = altitude / descentRate;
+        attribute :>> verticalSpeed = -descentRate;
     }
     abstract #Behavior action def GroundRelease :> DroneBehavior {
         doc /* Release the parcel on the ground with the motors idle. */
         in :>> powerFactor;
         attribute :>> releasesPayload = true;
+        attribute :>> airborne = false;
     }
 
     // ---------------------------------------------------------- behavior catalog
