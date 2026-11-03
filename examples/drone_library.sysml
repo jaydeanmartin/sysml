@@ -3,12 +3,15 @@ package DroneLibrary {
     private import ISQ::*;
 
     // ---------------------------------------------------------- markers
-    // The Library and Configurator tabs look for these two metadata tags.
+    // The Library and Configurator tabs look for these metadata tags.
     metadata def Component {
         doc /* A reusable component type. Its instances form the component catalog. */
     }
     metadata def SystemArchitecture {
-        doc /* A system-level part def. Its part usages are slots that component instances fill. */
+        doc /* A system-level part def. Its part usages are slots that component instances fill, its performed actions behavior slots that behavior instances fill. */
+    }
+    metadata def Behavior {
+        doc /* An abstract behavior: its in parameters are set by the system that performs it, its quantities by each mission step. */
     }
 
     // ---------------------------------------------------------- interfaces
@@ -239,5 +242,79 @@ package DroneLibrary {
             attribute :>> capacity = 15 [SI::kg];
             attribute :>> tetherLength = 30;
         }
+    }
+
+    // ---------------------------------------------------------- behaviors
+    // Abstract behaviors that architectures perform. The in parameters are the
+    // performance of the drone that performs it; the attributes without a value
+    // are quantities each mission step sets; duration and hoverTime are derived,
+    // so a mission's energy is hoverPower * sum(hoverTime).
+    // A specialized behavior's own parameters redefine the inherited ones by
+    // position, so each restates powerFactor before adding its own.
+    abstract #Behavior action def DroneBehavior {
+        doc /* A mission step of a delivery drone. */
+        in powerFactor : Real;                  // power draw, multiple of hover power
+        attribute duration : Real;              // s
+        attribute distance : Real default = 0;  // m flown
+        attribute hoverTime : Real = duration * powerFactor;   // s of hover with the same energy
+    }
+    abstract #Behavior action def Takeoff :> DroneBehavior {
+        doc /* Vertical climb to cruise altitude. */
+        in :>> powerFactor;
+        in climbRate : Real;                    // m/s
+        attribute altitude : Real;              // m
+        attribute :>> duration = altitude / climbRate;
+    }
+    abstract #Behavior action def Cruise :> DroneBehavior {
+        doc /* Level flight to the next waypoint. */
+        in :>> powerFactor;
+        in speed : Real;                        // m/s
+        attribute :>> distance;
+        attribute :>> duration = distance / speed;
+    }
+    abstract #Behavior action def Hover :> DroneBehavior {
+        doc /* Hold position, e.g. waiting for a landing zone to clear. */
+        in :>> powerFactor;
+    }
+    abstract #Behavior action def WinchLower :> DroneBehavior {
+        doc /* Lower the parcel on the tether while hovering, release it and reel the tether in. */
+        in :>> powerFactor;
+        in winchSpeed : Real;                   // m/s
+        attribute depth : Real;                 // m
+        attribute :>> duration = 2 * depth / winchSpeed + 10;   // 10 s to release
+    }
+    abstract #Behavior action def Land :> DroneBehavior {
+        doc /* Vertical descent and touchdown. */
+        in :>> powerFactor;
+        in descentRate : Real;                  // m/s
+        attribute altitude : Real;              // m
+        attribute :>> duration = altitude / descentRate;
+    }
+    abstract #Behavior action def GroundRelease :> DroneBehavior {
+        doc /* Release the parcel on the ground with the motors idle. */
+        in :>> powerFactor;
+    }
+
+    // ---------------------------------------------------------- behavior catalog
+    // Performance profiles: every parameter set, so a system instance can perform them.
+    package Behaviors {
+        action takeoffStandard : Takeoff { in :>> powerFactor = 1.4; in :>> climbRate = 3; }
+        action takeoffGentle : Takeoff {
+            doc /* Slow climb for heavy lifters */
+            in :>> powerFactor = 1.3;
+            in :>> climbRate = 2;
+        }
+        action cruise10 : Cruise { in :>> powerFactor = 1.05; in :>> speed = 10; }
+        action cruise12 : Cruise { in :>> powerFactor = 1.1; in :>> speed = 12; }
+        action cruise15 : Cruise { in :>> powerFactor = 1.2; in :>> speed = 15; }
+        action cruiseSport : Cruise {
+            doc /* Speed profile still being flight-tested: no power factor yet */
+            in :>> speed = 18;
+        }
+        action holdPosition : Hover { in :>> powerFactor = 1.0; }
+        action winch1 : WinchLower { in :>> powerFactor = 1.05; in :>> winchSpeed = 1; }
+        action landStandard : Land { in :>> powerFactor = 0.8; in :>> descentRate = 2; }
+        action landGentle : Land { in :>> powerFactor = 0.85; in :>> descentRate = 1.5; }
+        action releaseIdle : GroundRelease { in :>> powerFactor = 0.05; }
     }
 }

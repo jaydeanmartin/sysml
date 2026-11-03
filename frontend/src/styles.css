@@ -285,6 +285,26 @@ button.link:disabled { color: var(--muted); }
 .empty-card code.block { margin: 8px 0; }
 .table.slots td:first-child { white-space: nowrap; }
 
+/* ------------------------------------------------------------ behavior library & missions */
+.lib-cols.three { grid-template-columns: repeat(3, 1fr); }
+.lib-group { font-size: 10.5px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; padding: 6px 8px 2px; }
+.error-text { color: var(--err); }
+.mission-strip { display: flex; gap: 2px; height: 22px; border-radius: 5px; overflow: hidden; }
+.mission-strip .seg { flex-basis: 0; min-width: 4px; font-size: 10.5px; line-height: 22px; padding: 0 4px; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-group { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+.step-values { display: flex; flex-wrap: wrap; gap: 4px 10px; }
+.step-values label.inline { display: inline-flex; align-items: center; gap: 4px; }
+.step-values label.inline input { width: 90px; }
+.step-chip { font-size: 11.5px; padding: 1px 8px; border-radius: 99px; border: 1px solid currentColor; background: var(--surface); }
+.table tr.total-row td { border-top: 1px solid var(--line-strong); }
+/* one hue per behavior type, shared by the strip and the palette */
+.seg.c0 { background: #2563eb; } .step-chip.c0 { color: #2563eb; }
+.seg.c1 { background: #0d9488; } .step-chip.c1 { color: #0d9488; }
+.seg.c2 { background: #b45309; } .step-chip.c2 { color: #b45309; }
+.seg.c3 { background: #7c3aed; } .step-chip.c3 { color: #7c3aed; }
+.seg.c4 { background: #be185d; } .step-chip.c4 { color: #be185d; }
+.seg.c5 { background: #475569; } .step-chip.c5 { color: #475569; }
+
 /* ------------------------------------------------------------ modeless editor window */
 /* Floats over the workspace without blocking it: no backdrop, the diagram and tabs stay usable. */
 .float-win { position: fixed; z-index: 30; display: flex; flex-direction: column; background: var(--surface); border: 1px solid var(--line-strong); border-radius: 8px; box-shadow: 0 12px 36px rgba(15, 23, 42, .22); overflow: hidden; }

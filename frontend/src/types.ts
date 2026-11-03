@@ -234,20 +234,28 @@ export interface CatalogAttribute {
 }
 
 export interface Component extends Located {
+  /** part: a #Component part def; action: a #Behavior action def */
+  kind: "part" | "action";
   isAbstract: boolean;
   specializes: string[];
   attributes: CatalogAttribute[];
+  /** a behavior's in parameters, set by the system that performs it */
+  params: CatalogAttribute[];
   ports: { name: string; type: string | null; declaredIn: string | null }[];
   parts: { name: string; type: string | null; multiplicity: string | null }[];
   instances: string[];
 }
 
 export interface ComponentInstance extends Located {
+  /** part: a component instance; action: a behavior instance */
+  kind: "part" | "action";
   componentId: string;
   component: string;
   /** effective values (component defaults + the instance's own) */
   values: Record<string, string>;
   ownValues: Record<string, string>;
+  /** parameters still without a value: such a behavior instance cannot be performed */
+  missing: string[];
 }
 
 export interface Slot {
@@ -261,19 +269,74 @@ export interface Slot {
   candidates: string[];
 }
 
+/** a behavior the architecture performs (perform action usage typed by a #Behavior) */
+export interface BehaviorSlot {
+  name: string;
+  type: string;
+  typeId: string;
+  doc: string | null;
+  declaredIn: string | null;
+  /** ids of the complete behavior instances that fit */
+  candidates: string[];
+}
+
 export interface Architecture extends Located {
   isAbstract: boolean;
   specializes: string[];
   slots: Slot[];
+  behaviors: BehaviorSlot[];
   attributes: CatalogAttribute[];
   connections: number;
   /** qualified names of the requirement defs whose subject type this architecture conforms to */
   requirements: string[];
+  /** ... that also take mission totals as in parameters */
+  missionRequirements: string[];
 }
 
 export interface CatalogRequirement extends Located {
   subject: string;
   subjectTypeId: string;
+  /** names of its in parameters (mission requirements have some) */
+  params: string[];
+}
+
+/** a #Mission action def; each attribute is a total over the steps */
+export interface MissionType extends Located {
+  isAbstract: boolean;
+  specializes: string[];
+  totals: CatalogAttribute[];
+}
+
+export interface MissionStep {
+  name: string;
+  /** qualified name of the step's behavior (an abstract #Behavior action def) */
+  behavior: string | null;
+  /** quantity -> expression */
+  values: Record<string, string>;
+}
+
+export interface Mission extends Located {
+  missionTypeId: string;
+  missionType: string;
+  steps: MissionStep[];
+}
+
+/** a mission as one system instance flies it */
+export interface FlownMission {
+  /** why it cannot fly it (a behavior its architecture does not perform...) */
+  problems: string[];
+  steps: { name: string; performedBy: string; values: Record<string, number | null> }[];
+  totals: Record<string, number | null>;
+  /** mission requirement -> verdict */
+  verdicts: Record<string, "holds" | "fails" | "error">;
+}
+
+export interface MissionEvaluation {
+  missionType: string;
+  totals: string[];
+  /** mission qualified name (or "draft") -> system instance -> result */
+  missions: Record<string, Record<string, FlownMission>>;
+  errors: string[];
 }
 
 export interface SystemConfiguration extends Located {
@@ -281,6 +344,8 @@ export interface SystemConfiguration extends Located {
   architecture: string;
   /** slot name -> qualified name of the component instance */
   assignments: Record<string, string | null>;
+  /** behavior slot -> qualified name of the behavior instance performed */
+  behaviors: Record<string, string | null>;
 }
 
 export interface Catalog {
@@ -288,6 +353,8 @@ export interface Catalog {
   instances: ComponentInstance[];
   architectures: Architecture[];
   configurations: SystemConfiguration[];
+  missionTypes: MissionType[];
+  missions: Mission[];
   requirements: CatalogRequirement[];
   packages: { qualifiedName: string; modelId: string | null; modelName: string | null; loc: Loc | null }[];
   tags: Record<string, string>;
@@ -317,11 +384,28 @@ export interface ConfigurationRequest {
   name: string;
   doc?: string;
   assignments: Record<string, string | null>;
+  /** behavior slot -> behavior instance; every slot is required */
+  behaviors?: Record<string, string | null>;
+  package?: string | null;
+  replace?: string | null;
+}
+
+export interface StepRequest {
+  behavior: string;
+  values: Record<string, string>;
+}
+
+export interface MissionRequest {
+  missionType: string;
+  name: string;
+  doc?: string;
+  steps: StepRequest[];
   package?: string | null;
   replace?: string | null;
 }
 
 export interface ComponentRequest {
+  kind?: "part" | "action";
   name: string;
   package: string;
   specializes?: string | null;
@@ -329,4 +413,5 @@ export interface ComponentRequest {
   doc?: string;
   attributes: { name: string; type: string }[];
   ports: { name: string; type: string }[];
+  params?: { name: string; type: string }[];
 }

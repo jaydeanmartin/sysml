@@ -16,17 +16,19 @@ import { ConfiguratorPanel } from "./panels/ConfiguratorPanel";
 import { ExecutePanel } from "./panels/ExecutePanel";
 import { HistoryPanel } from "./panels/HistoryPanel";
 import { LibraryPanel } from "./panels/LibraryPanel";
+import { MissionsPanel } from "./panels/MissionsPanel";
 import { RequirementsPanel } from "./panels/RequirementsPanel";
 import { SNIPPETS } from "./snippets";
 import type { Catalog, CatalogChange, Diagnostic, GNode, Graph, Loc, Located, Model, ModelSummary, ModelTemplate, Project, Run, RunRequest } from "./types";
 
-type Tab = "diagram" | "library" | "configurator" | "requirements" | "execute" | "analyses" | "history";
-const CATALOG_TABS: Tab[] = ["library", "configurator"];
+type Tab = "diagram" | "library" | "configurator" | "missions" | "requirements" | "execute" | "analyses" | "history";
+const CATALOG_TABS: Tab[] = ["library", "configurator", "missions"];
 // [panel, label, icon, tooltip] in sidebar order
 const PANELS: [Tab, string, string, string][] = [
   ["diagram", "Diagram", "◫", "Structure, interconnection, requirement and behavior diagrams"],
-  ["library", "Library", "▤", "Component types and their catalog instances"],
+  ["library", "Library", "▤", "Component and behavior types and their catalog instances"],
   ["configurator", "Configurator", "⚙", "Configure system instances from catalog components"],
+  ["missions", "Missions", "⚑", "Plan missions as ordered behaviors and check them against system instances"],
   ["requirements", "Requirements", "✓", "Requirements, satisfy relations and verdicts"],
   ["execute", "Execute", "▶", "Run calcs, analyses, actions and state machines"],
   ["analyses", "Analyses", "ƒ", "REST analyses the model can call"],
@@ -617,6 +619,8 @@ export default function App() {
               <>
                 {tab === "library" ? (
                   <LibraryPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
+                ) : tab === "missions" ? (
+                  <MissionsPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
                 ) : (
                   <ConfiguratorPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
                 )}

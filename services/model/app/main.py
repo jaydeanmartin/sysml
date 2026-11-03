@@ -299,17 +299,11 @@ DEMOS = [
         [("Vehicle", "vehicle.sysml", "Vehicle architecture, requirements, behavior and analyses")],
     ),
     (
-        "product-line", "Product Line", "Component library, system architectures and configured system instances",
-        [
-            ("ComponentLibrary", "component_library.sysml", "Component types (#Component part defs) and their catalog instances"),
-            ("Architectures", "architectures.sysml", "System architectures (#SystemArchitecture) and the system instances configured from the catalog"),
-        ],
-    ),
-    (
         "delivery-drones", "Delivery Drones", "Configurable multirotor parcel delivery drones",
         [
             ("DroneLibrary", "drone_library.sysml", "Frames, batteries, motors, propellers and payload modules, with their catalog instances"),
             ("DroneArchitectures", "drone_architectures.sysml", "Quad, hexa and octo architectures, sizing requirements and configured drones"),
+            ("DroneMissions", "drone_missions.sysml", "Behavior library and delivery missions built from ordered behaviors"),
         ],
     ),
 ]
@@ -685,19 +679,21 @@ class FeatureIn(BaseModel):
 class ComponentIn(BaseModel):
     name: str
     package: str = Field(description="qualified name of the package to declare the component in")
+    kind: Literal["part", "action"] = Field("part", description="part: a #Component part def; action: a #Behavior action def")
     specializes: str | None = None
     abstract: bool = False
     doc: str = ""
     attributes: list[FeatureIn] = []
     ports: list[FeatureIn] = []
+    params: list[FeatureIn] = Field(default=[], description="a behavior's in parameters, set by the system that performs it")
 
 
 class InstanceIn(BaseModel):
     component: str = Field(description="qualified name of the component part def")
     name: str
     doc: str = ""
-    values: dict[str, str] = Field(default={}, description="attribute name -> SysML expression, e.g. '140 [SI::kg]'")
-    package: str | None = Field(None, description="default: the Catalog package next to the component")
+    values: dict[str, str] = Field(default={}, description="attribute or parameter name -> SysML expression, e.g. '140 [SI::kg]'")
+    package: str | None = Field(None, description="default: the Catalog (Behaviors) package next to the component (behavior)")
     replace: str | None = Field(None, description="qualified name of an existing instance to rewrite")
 
 
@@ -706,8 +702,28 @@ class ConfigurationIn(BaseModel):
     name: str
     doc: str = ""
     assignments: dict[str, str | None] = Field(default={}, description="slot name -> qualified name of a component instance")
+    behaviors: dict[str, str | None] = Field(default={}, description="behavior slot -> qualified name of a complete behavior instance; every slot is required")
     package: str | None = Field(None, description="default: the Configurations package next to the architecture")
     replace: str | None = Field(None, description="qualified name of an existing system instance to rewrite")
+
+
+class StepIn(BaseModel):
+    behavior: str = Field(description="qualified name of the #Behavior action def")
+    values: dict[str, str] = Field(default={}, description="quantity -> SysML expression; every quantity is required")
+
+
+class MissionIn(BaseModel):
+    missionType: str = Field(description="qualified name of the #Mission action def")
+    name: str
+    doc: str = ""
+    steps: list[StepIn] = Field(default=[], description="the steps, in the order they are performed")
+    package: str | None = Field(None, description="default: the Missions package next to the mission type")
+    replace: str | None = Field(None, description="qualified name of an existing mission to rewrite")
+
+
+class MissionCheckIn(BaseModel):
+    missionType: str
+    draft: list[StepIn] | None = Field(None, description="steps of an unsaved mission to check as well (key 'draft')")
 
 
 def _project_heads(project_id: uuid.UUID) -> list[dict[str, Any]]:
@@ -761,7 +777,7 @@ def _default_package(cat: dict[str, Any], near: dict[str, Any], name: str) -> st
 
 def _all_qns(cat: dict[str, Any]) -> set[str]:
     out = {p["qualifiedName"] for p in cat["packages"]}
-    for key in ("components", "instances", "architectures", "configurations"):
+    for key in ("components", "instances", "architectures", "configurations", "missionTypes", "missions"):
         out |= {i["qualifiedName"] for i in cat[key]}
     return out
 
@@ -805,16 +821,23 @@ def get_catalog(project_id: uuid.UUID) -> dict[str, Any]:
 
 @app.post("/projects/{project_id}/catalog/components", status_code=201)
 def create_component(project_id: uuid.UUID, body: ComponentIn) -> dict[str, Any]:
-    """Declare a new ``#Component part def``."""
+    """Declare a new ``#Component part def`` (or, with kind ``action``, a ``#Behavior action def``)."""
     cat, sources = _project_catalog(project_id)
-    tag = cat["tags"].get(catalog.COMPONENT_TAG)
+    tag_name = catalog.COMPONENT_TAG if body.kind == "part" else catalog.BEHAVIOR_TAG
+    tag = cat["tags"].get(tag_name)
     if not tag:
-        raise HTTPException(409, "No 'metadata def Component' in this project: create a model from the component library template first")
+        raise HTTPException(409, f"No 'metadata def {tag_name}' in this project: declare it first")
+    if body.kind == "action" and any(f.name.strip() for f in body.ports):
+        raise HTTPException(422, "a behavior has no ports")
+    if body.kind == "part" and any(f.name.strip() for f in body.params):
+        raise HTTPException(422, "a component has no parameters")
+    general = next((c for c in cat["components"] if body.specializes and c["qualifiedName"].endswith(body.specializes)), None)
     model_id, pkg_qn, apply = _place(cat, sources, body.name, body.package, None)
     try:
         block = catalog.component_text(
             body.name, catalog.ref(tag, pkg_qn), body.specializes, [f.model_dump() for f in body.attributes],
-            [f.model_dump() for f in body.ports], body.doc, body.abstract,
+            [f.model_dump() for f in body.ports], body.doc, body.abstract, body.kind,
+            [f.model_dump() for f in body.params], [p["name"] for p in general["params"]] if general else [],
         )
         source = apply(block)
     except catalog.CatalogError as exc:
@@ -827,17 +850,17 @@ def save_instance(project_id: uuid.UUID, body: InstanceIn) -> dict[str, Any]:
     """Create (or, with ``replace``, rewrite) a component instance in the catalog."""
     cat, sources = _project_catalog(project_id)
     comp = _find(cat["components"], body.component, "component")
-    if comp["isAbstract"]:
+    if comp["isAbstract"] and comp["kind"] == "part":  # abstract behaviors get instances: their parameters set
         raise HTTPException(422, f"'{comp['name']}' is abstract: instantiate one of its specializations")
-    attrs = {a["name"] for a in comp["attributes"]}
-    unknown = set(body.values) - attrs
+    params = frozenset(p["name"] for p in comp["params"])
+    unknown = set(body.values) - {a["name"] for a in comp["attributes"]} - params
     if unknown:
         raise HTTPException(422, f"{comp['name']} has no attribute {', '.join(sorted(unknown))}")
     replace = _find(cat["instances"], body.replace, "instance") if body.replace else None
-    package = body.package or _default_package(cat, comp, "Catalog")
+    package = body.package or _default_package(cat, comp, "Catalog" if comp["kind"] == "part" else "Behaviors")
     model_id, pkg_qn, apply = _place(cat, sources, body.name, package, replace)
     try:
-        block = catalog.instance_text(body.name, catalog.ref(comp["qualifiedName"], pkg_qn), body.values, body.doc)
+        block = catalog.instance_text(body.name, catalog.ref(comp["qualifiedName"], pkg_qn), body.values, body.doc, comp["kind"], params)
         source = apply(block)
     except catalog.CatalogError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -865,12 +888,27 @@ def save_configuration(project_id: uuid.UUID, body: ConfigurationIn) -> dict[str
             raise HTTPException(404, f"instance '{inst_qn}' not found")
         if inst["id"] not in slots[slot]["candidates"]:
             raise HTTPException(422, f"'{inst['name']}' is a {inst['component']}, which does not fit slot {slot} : {slots[slot]['type']}")
+    performs = {b["name"]: b for b in arch["behaviors"]}
+    for slot in set(body.behaviors) - set(performs):
+        raise HTTPException(422, f"{arch['name']} performs no '{slot}'")
+    unset = [b for b in performs if not body.behaviors.get(b)]
+    if unset:
+        raise HTTPException(422, f"A {arch['name']} must perform {', '.join(unset)}: choose a behavior instance for each")
+    for slot, inst_qn in body.behaviors.items():
+        inst = inst_by_qn.get(inst_qn or "")
+        if not inst:
+            raise HTTPException(404, f"behavior instance '{inst_qn}' not found")
+        if inst["missing"]:
+            raise HTTPException(422, f"'{inst['name']}' does not set {', '.join(inst['missing'])}: a performed behavior needs every parameter")
+        if inst["id"] not in performs[slot]["candidates"]:
+            raise HTTPException(422, f"'{inst['name']}' is a {inst['component']}, which does not fit {slot} : {performs[slot]['type']}")
     replace = _find(cat["configurations"], body.replace, "system instance") if body.replace else None
     package = body.package or _default_package(cat, arch, "Configurations")
     model_id, pkg_qn, apply = _place(cat, sources, body.name, package, replace)
     ordered = {s: catalog.ref(body.assignments[s], pkg_qn) for s in slots if body.assignments.get(s)}
+    behaviors = {b: catalog.ref(body.behaviors[b], pkg_qn) for b in performs}
     try:
-        block = catalog.configuration_text(body.name, catalog.ref(arch["qualifiedName"], pkg_qn), ordered, body.doc)
+        block = catalog.configuration_text(body.name, catalog.ref(arch["qualifiedName"], pkg_qn), ordered, body.doc, behaviors)
         source = apply(block)
     except catalog.CatalogError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -880,12 +918,150 @@ def save_configuration(project_id: uuid.UUID, body: ConfigurationIn) -> dict[str
     }
 
 
+@app.post("/projects/{project_id}/catalog/missions", status_code=201)
+def save_mission(project_id: uuid.UUID, body: MissionIn) -> dict[str, Any]:
+    """Create (or rewrite) a mission: an ordered list of behaviors, each with its quantities set."""
+    cat, sources = _project_catalog(project_id)
+    mtype = _find(cat["missionTypes"], body.missionType, "mission type")
+    _check_steps(cat, body.steps)
+    replace = _find(cat["missions"], body.replace, "mission") if body.replace else None
+    package = body.package or _default_package(cat, mtype, "Missions")
+    model_id, pkg_qn, apply = _place(cat, sources, body.name, package, replace)
+    names = catalog.step_names([s.behavior for s in body.steps])
+    steps = [(n, catalog.ref(s.behavior, pkg_qn), s.values) for n, s in zip(names, body.steps)]
+    try:
+        block = catalog.mission_text(body.name, catalog.ref(mtype["qualifiedName"], pkg_qn), steps, body.doc)
+        source = apply(block)
+    except catalog.CatalogError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    verb = "Update" if replace else "Plan"
+    return _commit(model_id, source, f"{verb} mission {body.name} : {mtype['name']}") | {
+        "qualifiedName": f"{pkg_qn}::{body.name}", "text": "\n".join(block),
+    }
+
+
+def _quantities(behavior: dict[str, Any]) -> list[str]:
+    """Attributes a mission step sets: those without a value in the behavior."""
+    return [a["name"] for a in behavior["attributes"] if not a["value"]]
+
+
+def _check_steps(cat: dict[str, Any], steps: list[StepIn]) -> None:
+    behaviors = {c["qualifiedName"]: c for c in cat["components"] if c["kind"] == "action"}
+    for i, s in enumerate(steps, 1):
+        b = behaviors.get(s.behavior)
+        if not b:
+            raise HTTPException(404, f"step {i}: behavior '{s.behavior}' not found")
+        quantities = _quantities(b)
+        unknown = set(s.values) - set(quantities)
+        if unknown:
+            raise HTTPException(422, f"step {i} ({b['name']}) sets {', '.join(sorted(unknown))}, which is not one of its quantities ({', '.join(quantities) or 'none'})")
+        unset = [q for q in quantities if not (s.values.get(q) or "").strip()]
+        if unset:
+            raise HTTPException(422, f"step {i} ({b['name']}) needs {', '.join(unset)}")
+
+
+_NUM_RE = re.compile(r"-?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?")
+
+
+def _number(v: str | None) -> float | None:
+    m = _NUM_RE.search(v or "")
+    return float(m.group(0)) if m else None
+
+
+@app.post("/projects/{project_id}/catalog/missions/evaluate")
+def evaluate_missions(project_id: uuid.UUID, body: MissionCheckIn) -> dict[str, Any]:
+    """Fly every mission of a mission type (and an unsaved draft) with every system
+    instance that performs behaviors: each step is flown with the behavior the
+    system performs for the step's behavior type, the mission's totals are summed
+    over the flown steps, and each mission requirement whose parameters are all
+    totals is checked as Req(system, total, ...). One evaluate run in all."""
+    cat, sources = _project_catalog(project_id)
+    mtype = _find(cat["missionTypes"], body.missionType, "mission type")
+    totals = [t["name"] for t in mtype["totals"]]
+    comps = {c["qualifiedName"]: c for c in cat["components"]}
+    ancestors: dict[str, set[str]] = {}
+
+    def lineage(qn: str) -> set[str]:  # the behavior and every behavior it specializes
+        if qn not in ancestors:
+            ancestors[qn] = {qn}.union(*(lineage(g) for g in comps.get(qn, {}).get("specializes", []) if g in comps))
+        return ancestors[qn]
+
+    scratch = "MissionCheck__"
+    missions = {m["qualifiedName"]: (m["qualifiedName"], m["steps"]) for m in cat["missions"] if m["missionType"] == mtype["qualifiedName"]}
+    lines = [f"package {scratch} {{", "    private import ScalarValues::*;"]
+    if body.draft is not None:
+        _check_steps(cat, body.draft)
+        names = catalog.step_names([s.behavior for s in body.draft])
+        draft_steps = [(n, s.behavior, s.values) for n, s in zip(names, body.draft)]
+        lines += [f"    {l}" for l in catalog.mission_text("draft", mtype["qualifiedName"], draft_steps)]
+        missions["draft"] = (f"{scratch}::draft", [{"name": n, "behavior": b} for n, b, _ in draft_steps])
+    reqs = {r["qualifiedName"]: r for r in cat["requirements"]}
+    archs = {a["id"]: a for a in cat["architectures"]}
+
+    out: dict[str, dict[str, Any]] = {}
+    exprs: list[tuple[str, Any]] = []  # (expression, where its value goes)
+    n = 0
+    for key, (mission_qn, steps) in missions.items():
+        out[key] = {}
+        for cfg in cat["configurations"]:
+            arch = archs[cfg["architectureId"]]
+            if not arch["behaviors"]:
+                continue
+            res: dict[str, Any] = {"problems": [], "steps": [], "totals": {}, "verdicts": {}}
+            out[key][cfg["qualifiedName"]] = res
+            flown = []
+            for s in steps:
+                slot = next((b for b in arch["behaviors"] if s["behavior"] and b["type"] in lineage(s["behavior"])), None)
+                if not slot:
+                    res["problems"].append(f"{arch['name']} does not perform {(s['behavior'] or '?').rsplit('::', 1)[-1]}")
+                elif not cfg["behaviors"].get(slot["name"]):
+                    res["problems"].append(f"no behavior chosen for {slot['name']}")
+                else:
+                    n += 1
+                    flown.append(f"f{n}")
+                    lines.append("    " + catalog.flown_step(f"f{n}", f"{cfg['qualifiedName']}.{slot['name']}", f"{mission_qn}.{s['name']}"))
+                    res["steps"].append({"name": s["name"], "performedBy": cfg["behaviors"][slot["name"]], "values": {}})
+                    for t in totals:
+                        exprs.append((f"{scratch}::f{n}.{t}", (res["steps"][-1]["values"], t)))
+            res["problems"] = sorted(set(res["problems"]))
+            if res["problems"]:
+                res["steps"] = []
+                exprs[:] = [e for e in exprs if not any(e[0].startswith(f"{scratch}::{f}.") for f in flown)]
+                continue
+            for rq in arch["missionRequirements"]:
+                params = reqs[rq]["params"]
+                if all(p in totals for p in params):
+                    args = [" + ".join(f"{scratch}::{f}.{p}" for f in flown) or "0" for p in params]
+                    exprs.append((f"{rq}({', '.join([cfg['qualifiedName'], *args])})", (res["verdicts"], rq)))
+    lines.append("}")
+
+    errors: list[str] = []
+    if exprs:
+        rows = _project_heads(project_id)
+        files = [{"name": f"{r['name']}.sysml", "text": r["source"]} for r in rows] + [{"name": f"{scratch}.sysml", "text": "\n".join(lines) + "\n"}]
+        run = _interpreter("/execute", {"files": files, "kind": "evaluate", "expression": "\n".join(e for e, _ in exprs), "trace": False})
+        got = {c["subject"]: (c["values"][0]["value"] if c["values"] else None) for c in run.get("checks") or []}
+        for expr, (target, key) in exprs:
+            v = got.get(expr)
+            if target is not None and isinstance(target, dict) and key in reqs:
+                target[key] = "holds" if v == "true" else "fails" if v == "false" else "error"
+            else:
+                target[key] = _number(v)
+        errors = run.get("errors") or []
+    for per_cfg in out.values():
+        for res in per_cfg.values():
+            if not res["problems"]:
+                vals = {t: [s["values"].get(t) for s in res["steps"]] for t in totals}
+                res["totals"] = {t: None if None in v else sum(v) for t, v in vals.items()}
+    return {"missionType": mtype["qualifiedName"], "totals": totals, "missions": out, "errors": errors}
+
+
 @app.delete("/projects/{project_id}/catalog/elements")
 def delete_catalog_element(project_id: uuid.UUID, qualifiedName: str) -> dict[str, Any]:
-    """Remove a component, instance or system instance from its model's text.
-    Refused while something else still refers to it."""
+    """Remove a component, behavior, instance, system instance or mission from its
+    model's text. Refused while something else still refers to it."""
     cat, sources = _project_catalog(project_id)
-    items = cat["components"] + cat["instances"] + cat["configurations"]
+    items = cat["components"] + cat["instances"] + cat["configurations"] + cat["missions"]
     item = _find(items, qualifiedName, "element")
     source = catalog.remove_element(sources[item["modelId"]], item["loc"])
     return _commit(item["modelId"], source, f"Remove {item['name']}") | {"qualifiedName": qualifiedName}

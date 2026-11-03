@@ -5,6 +5,9 @@ import type {
   ComponentRequest,
   ConfigurationRequest,
   InstanceRequest,
+  MissionEvaluation,
+  MissionRequest,
+  StepRequest,
   ModelTemplate,
   Invocation,
   Model,
@@ -76,6 +79,10 @@ export const api = {
     call<CatalogChange>(`${M}/projects/${projectId}/catalog/instances`, { method: "POST", json: req }),
   saveConfiguration: (projectId: string, req: ConfigurationRequest) =>
     call<CatalogChange>(`${M}/projects/${projectId}/catalog/configurations`, { method: "POST", json: req }),
+  saveMission: (projectId: string, req: MissionRequest) =>
+    call<CatalogChange>(`${M}/projects/${projectId}/catalog/missions`, { method: "POST", json: req }),
+  evaluateMissions: (projectId: string, missionType: string, draft: StepRequest[] | null) =>
+    call<MissionEvaluation>(`${M}/projects/${projectId}/catalog/missions/evaluate`, { method: "POST", json: { missionType, draft } }),
   deleteCatalogElement: (projectId: string, qualifiedName: string) =>
     call<CatalogChange>(`${M}/projects/${projectId}/catalog/elements?qualifiedName=${encodeURIComponent(qualifiedName)}`, {
       method: "DELETE",

@@ -20,6 +20,13 @@ package DroneArchitectures {
         connect motors.shaft to propellers.hub;
         connect airframe.payloadMount to payload.mount;
 
+        // behavior slots: each system instance performs a behavior instance
+        perform action takeoff : Takeoff;
+        perform action cruise : Cruise;
+        perform action hover : Hover;
+        perform action land : Land;
+        perform action release : GroundRelease;
+
         // sin(pi / rotors): the gap between adjacent motors is wheelbase * spacing
         attribute spacing : Real;
 
@@ -50,8 +57,9 @@ package DroneArchitectures {
         attribute :>> spacing = 0.5;
     }
     #SystemArchitecture part def Octocopter :> DeliveryDrone {
-        doc /* Eight rotors: heavy lift with motor-out redundancy. */
+        doc /* Eight rotors: heavy lift with motor-out redundancy; lowers parcels on a winch. */
         part :>> motors[8];
+        perform action winch : WinchLower;
         part :>> propellers[8];
         attribute :>> spacing = 0.3827;
     }
@@ -99,6 +107,11 @@ package DroneArchitectures {
             part :>> motors :> DroneLibrary::Catalog::m2814;
             part :>> propellers :> DroneLibrary::Catalog::prop10x4_5;
             part :>> payload :> DroneLibrary::Catalog::box1kg;
+            perform action :>> takeoff :> DroneLibrary::Behaviors::takeoffStandard;
+            perform action :>> cruise :> DroneLibrary::Behaviors::cruise15;
+            perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
+            perform action :>> land :> DroneLibrary::Behaviors::landStandard;
+            perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
         }
         part parcel : Quadcopter {
             doc /* Standard 2 kg parcel delivery */
@@ -107,6 +120,11 @@ package DroneArchitectures {
             part :>> motors :> DroneLibrary::Catalog::m4114;
             part :>> propellers :> DroneLibrary::Catalog::prop15x5;
             part :>> payload :> DroneLibrary::Catalog::box2kg;
+            perform action :>> takeoff :> DroneLibrary::Behaviors::takeoffStandard;
+            perform action :>> cruise :> DroneLibrary::Behaviors::cruise12;
+            perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
+            perform action :>> land :> DroneLibrary::Behaviors::landStandard;
+            perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
         }
         part parcelLongRange : Quadcopter {
             doc /* The parcel drone with the big battery: flies longer, but too heavy for its motors */
@@ -115,6 +133,11 @@ package DroneArchitectures {
             part :>> motors :> DroneLibrary::Catalog::m4114;
             part :>> propellers :> DroneLibrary::Catalog::prop15x5;
             part :>> payload :> DroneLibrary::Catalog::box2kg;
+            perform action :>> takeoff :> DroneLibrary::Behaviors::takeoffStandard;
+            perform action :>> cruise :> DroneLibrary::Behaviors::cruise12;
+            perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
+            perform action :>> land :> DroneLibrary::Behaviors::landStandard;
+            perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
         }
         part regional : Hexacopter {
             doc /* 5 kg parcels, motor-out redundancy */
@@ -123,6 +146,11 @@ package DroneArchitectures {
             part :>> motors :> DroneLibrary::Catalog::m6215;
             part :>> propellers :> DroneLibrary::Catalog::prop22x7;
             part :>> payload :> DroneLibrary::Catalog::box5kg;
+            perform action :>> takeoff :> DroneLibrary::Behaviors::takeoffStandard;
+            perform action :>> cruise :> DroneLibrary::Behaviors::cruise12;
+            perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
+            perform action :>> land :> DroneLibrary::Behaviors::landStandard;
+            perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
         }
         part regionalLiIon : Hexacopter {
             doc /* Li-ion pack for endurance: the pack cannot deliver full-throttle power */
@@ -131,6 +159,11 @@ package DroneArchitectures {
             part :>> motors :> DroneLibrary::Catalog::m6215;
             part :>> propellers :> DroneLibrary::Catalog::prop22x7;
             part :>> payload :> DroneLibrary::Catalog::box5kg;
+            perform action :>> takeoff :> DroneLibrary::Behaviors::takeoffStandard;
+            perform action :>> cruise :> DroneLibrary::Behaviors::cruise10;
+            perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
+            perform action :>> land :> DroneLibrary::Behaviors::landGentle;
+            perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
         }
         part heavyLift : Octocopter {
             doc /* 10 kg winch delivery */
@@ -139,6 +172,12 @@ package DroneArchitectures {
             part :>> motors :> DroneLibrary::Catalog::m6215;
             part :>> propellers :> DroneLibrary::Catalog::prop22x7;
             part :>> payload :> DroneLibrary::Catalog::winch10kg;
+            perform action :>> takeoff :> DroneLibrary::Behaviors::takeoffGentle;
+            perform action :>> cruise :> DroneLibrary::Behaviors::cruise10;
+            perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
+            perform action :>> land :> DroneLibrary::Behaviors::landGentle;
+            perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
+            perform action :>> winch :> DroneLibrary::Behaviors::winch1;
         }
     }
 }

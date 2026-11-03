@@ -116,3 +116,101 @@ def test_replace_and_remove_element():
     out = catalog.replace_element(SRC, loc, ["part a : U {", "    doc /* x */", "}"])
     assert "        part a : U {\n            doc /* x */\n        }\n    }" in out
     assert catalog.remove_element(SRC, loc) == SRC.replace("        part a : T;\n", "")
+
+
+
+MISSION_GRAPH = {
+    "nodes": [
+        node("B", "package", "B"),
+        node("B__Behavior", "metadata def", "Behavior", "B"),
+        node("B__Mission", "metadata def", "Mission", "B"),
+        node("B__Step", "action def", "Step", "B", metadata=["Behavior"], isAbstract=True),
+        node("B__Step__factor", "param", "factor", "B__Step", direction="in"),
+        node("B__Step__duration", "attribute", "duration", "B__Step", typeName="Real"),
+        node("B__Fly", "action def", "Fly", "B", isAbstract=True),  # a behavior by specialization
+        node("B__Fly__factor", "param", "factor", "B__Fly", direction="in"),
+        node("B__Fly__speed", "param", "speed", "B__Fly", direction="in"),
+        node("B__Fly__distance", "attribute", "distance", "B__Fly", typeName="Real"),
+        node("B__Fly__duration", "attribute", "duration", "B__Fly", value="distance / speed"),
+        node("B__Lib", "package", "Lib", "B"),
+        node("B__Lib__fast", "action", "fast", "B__Lib", typeId="B__Fly", typeName="Fly"),
+        node("B__Lib__fast__speed", "param", "speed", "B__Lib__fast", direction="in", value="15"),
+        node("B__Lib__fast__factor", "param", "factor", "B__Lib__fast", direction="in", value="1.2"),
+        node("B__Lib__draft", "action", "draft", "B__Lib", typeId="B__Fly", typeName="Fly"),
+        node("B__Lib__draft__speed", "param", "speed", "B__Lib__draft", direction="in", value="18"),
+        node("B__Delivery", "action def", "Delivery", "B", metadata=["Mission"]),
+        node("B__Delivery__duration", "attribute", "duration", "B__Delivery", typeName="Real"),
+        node("B__Drone", "part def", "Drone", "B", metadata=["SystemArchitecture"]),
+        node("B__Drone__fly", "perform", "fly", "B__Drone", typeId="B__Fly", typeName="Fly"),
+        node("B__Energy", "requirement def", "Energy", "B"),
+        node("B__Energy__drone", "subject", "drone", "B__Energy", typeId="B__Drone"),
+        node("B__Energy__duration", "param", "duration", "B__Energy", direction="in"),
+        node("B__Cfg", "package", "Cfg", "B"),
+        node("B__Cfg__d1", "part", "d1", "B__Cfg", typeId="B__Drone", typeName="Drone"),
+        node("B__Cfg__d1__fly", "perform", "fly", "B__Cfg__d1", subsets="B__Lib__fast"),
+        node("B__Ms", "package", "Ms", "B"),
+        node("B__Ms__trip", "action", "trip", "B__Ms", typeId="B__Delivery", typeName="Delivery"),
+        node("B__Ms__trip__fly", "action", "fly", "B__Ms__trip", typeId="B__Fly", typeName="Fly"),
+        node("B__Ms__trip__fly__distance", "attribute", "distance", "B__Ms__trip__fly", value="2000"),
+        node("B__Ms__trip__other", "action", "other", "B__Ms__trip"),
+    ],
+    "edges": [{"id": "s1", "kind": "specializes", "source": "B__Fly", "target": "B__Step"}],
+}
+
+
+def test_behaviors_missions_and_mission_requirements():
+    cat = catalog.build(MISSION_GRAPH, {"Lib.sysml": {"id": "lib", "name": "Lib"}})
+    comps = {c["name"]: c for c in cat["components"]}
+    assert set(comps) == {"Step", "Fly"} and comps["Fly"]["kind"] == "action"
+    assert [p["name"] for p in comps["Fly"]["params"]] == ["factor", "speed"]
+    # quantities: attributes without a value, set by mission steps
+    assert [a["name"] for a in comps["Fly"]["attributes"] if not a["value"]] == ["distance"]
+    inst = {i["name"]: i for i in cat["instances"]}
+    assert inst["fast"]["kind"] == "action" and inst["fast"]["missing"] == []
+    assert inst["draft"]["missing"] == ["factor"]
+    [arch] = cat["architectures"]
+    [slot] = arch["behaviors"]
+    assert slot["name"] == "fly" and slot["type"] == "B::Fly"
+    assert slot["candidates"] == [inst["fast"]["id"]]  # the incomplete one cannot be performed
+    assert arch["requirements"] == [] and arch["missionRequirements"] == ["B::Energy"]
+    assert cat["requirements"][0]["params"] == ["duration"]
+    [cfg] = cat["configurations"]
+    assert cfg["behaviors"] == {"fly": "B::Lib::fast"}
+    [mt] = cat["missionTypes"]
+    assert [t["name"] for t in mt["totals"]] == ["duration"]
+    [m] = cat["missions"]
+    assert m["steps"] == [
+        {"name": "fly", "behavior": "B::Fly", "values": {"distance": "2000"}},
+        {"name": "other", "behavior": None, "values": {}},
+    ]
+
+
+def test_behavior_and_mission_text():
+    names = catalog.step_names(["B::Fly", "B::Land", "B::Fly", "B::Start"])
+    assert names == ["fly", "land", "fly_2", "startStep"]
+    text = catalog.mission_text("trip", "Delivery", [("fly", "Fly", {"distance": "2000"}), ("land", "Land", {})], "2 km")
+    assert text == [
+        "action trip : Delivery {",
+        "    doc /* 2 km */",
+        "    first start;",
+        "    then action fly : Fly { attribute :>> distance = 2000; }",
+        "    then action land : Land;",
+        "    then done;",
+        "}",
+    ]
+    assert catalog.mission_text("empty", "Delivery", []) == ["action empty : Delivery;"]
+    assert catalog.instance_text("fast", "Fly", {"speed": "15", "note": "1"}, keyword="action", params=frozenset({"speed"}))[1:3] == [
+        "    in :>> speed = 15;",
+        "    attribute :>> note = 1;",
+    ]
+    # a specialized behavior restates the inherited parameters before its own
+    assert catalog.component_text("Fly", "Behavior", "Step", [], [], keyword="action", params=[{"name": "speed", "type": "Real"}], inherited_params=["factor"]) == [
+        "#Behavior action def Fly :> Step {",
+        "    in :>> factor;",
+        "    in speed : Real;",
+        "}",
+    ]
+    assert catalog.configuration_text("d1", "Drone", {}, behaviors={"fly": "Lib::fast"}) == ["part d1 : Drone {", "    perform action :>> fly :> Lib::fast;", "}"]
+    assert catalog.flown_step("f1", "Cfg::d1.fly", "Ms::trip.fly") == "action f1 :> Cfg::d1.fly, Ms::trip.fly;"
+    with pytest.raises(catalog.CatalogError):
+        catalog.mission_text("x", "Delivery", [("1bad", "Fly", {})])

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import type { CatalogChange, Component, ComponentInstance } from "../types";
+import type { CatalogAttribute, CatalogChange, Component, ComponentInstance } from "../types";
 import { NAME_RE, partText, placeholder, ref, short, type CatalogPanelProps } from "./catalogUtil";
 
 interface InstanceForm {
@@ -13,6 +13,7 @@ interface InstanceForm {
 }
 
 interface ComponentForm {
+  kind: "part" | "action";
   name: string;
   package: string;
   specializes: string;
@@ -20,9 +21,12 @@ interface ComponentForm {
   doc: string;
   attributes: { name: string; type: string }[];
   ports: { name: string; type: string }[];
+  /** a behavior's in parameters */
+  params: { name: string; type: string }[];
 }
 
-/** Component library: component types (#Component part defs) and their instances. */
+/** Component library: component types (#Component part defs), abstract
+ *  behaviors (#Behavior action defs with in parameters) and their instances. */
 export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChange, onOpen }: CatalogPanelProps) {
   const [selected, setSelected] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
@@ -76,11 +80,13 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
     return ids;
   };
   const shown = comp ? instances.filter((i) => family(comp).has(i.component)) : [];
-  const concrete = components.filter((c) => !c.isAbstract);
+  // abstract behaviors get instances (their parameters set); abstract components do not
+  const concrete = components.filter((c) => !c.isAbstract || c.kind === "action");
+  const hasBehaviors = components.some((c) => c.kind === "action");
   const visible = tree.filter(({ c }) => !filter || c.name.toLowerCase().includes(filter.toLowerCase()) || instances.some((i) => i.component === c.qualifiedName && i.name.toLowerCase().includes(filter.toLowerCase())));
 
   const newInstance = (c?: Component) => {
-    const target = c && !c.isAbstract ? c : concrete.find((x) => c && family(c).has(x.qualifiedName)) || concrete[0];
+    const target = c && concrete.includes(c) ? c : concrete.find((x) => c && family(c).has(x.qualifiedName)) || concrete[0];
     if (!target) return;
     const n = instances.filter((i) => i.component === target.qualifiedName).length + 1;
     setCompForm(null);
@@ -90,10 +96,14 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
     setCompForm(null);
     setForm({ component: i.component, name: i.name, doc: i.doc || "", package: i.package || "", values: { ...i.ownValues }, replace: i.qualifiedName });
   };
-  const newComponent = () => {
+  const newComponent = (kind: "part" | "action") => {
     setForm(null);
-    const pkg = comp?.package || catalog?.packages.find((p) => catalog.tags.Component && catalog.tags.Component.startsWith(p.qualifiedName + "::"))?.qualifiedName || "";
-    setCompForm({ name: "", package: pkg, specializes: "", abstract: false, doc: "", attributes: [{ name: "mass", type: "MassValue" }], ports: [] });
+    const tag = catalog?.tags[TAG[kind]];
+    const pkg = (comp?.kind === kind && comp.package) || catalog?.packages.find((p) => tag && tag.startsWith(p.qualifiedName + "::"))?.qualifiedName || "";
+    const attributes = kind === "part" ? [{ name: "mass", type: "MassValue" }] : [{ name: "area", type: "Real" }];
+    const params = kind === "part" ? [] : [{ name: "speed", type: "Real" }];
+    const general = kind === "action" ? components.find((c) => c.kind === "action" && !c.specializes.some((g) => byQn.has(g))) : undefined;
+    setCompForm({ kind, name: "", package: pkg, specializes: general?.qualifiedName || "", abstract: kind === "action", doc: "", attributes, ports: [], params });
   };
 
   const run = async (fn: () => Promise<CatalogChange>, after?: (qn: string) => void) => {
@@ -125,7 +135,8 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
           ...compForm,
           specializes: compForm.specializes ? ref(compForm.specializes, compForm.package) : null,
           attributes: compForm.attributes.filter((a) => a.name.trim()),
-          ports: compForm.ports.filter((p) => p.name.trim()),
+          ports: compForm.kind === "part" ? compForm.ports.filter((p) => p.name.trim()) : [],
+          params: compForm.kind === "action" ? compForm.params.filter((p) => p.name.trim()) : [],
         }),
       (qn) => {
         setCompForm(null);
@@ -138,7 +149,8 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
   function defaultCatalogPackage(c?: Component) {
     if (!c || !catalog) return "";
     const root = c.qualifiedName.split("::")[0];
-    const cands = catalog.packages.filter((p) => p.modelId === c.modelId && short(p.qualifiedName) === "Catalog").map((p) => p.qualifiedName);
+    const name = c.kind === "action" ? "Behaviors" : "Catalog";
+    const cands = catalog.packages.filter((p) => p.modelId === c.modelId && short(p.qualifiedName) === name).map((p) => p.qualifiedName);
     cands.sort((a, b) => Number(!a.startsWith(root + "::")) - Number(!b.startsWith(root + "::")) || a.split("::").length - b.split("::").length);
     return cands[0] || c.package || "";
   }
@@ -146,17 +158,22 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
   const instancePreview =
     form && formComp
       ? partText(
-          `part ${form.name || "…"} : ${ref(formComp.qualifiedName, scope)}`,
-          formComp.attributes.filter((a) => form.values[a.name]?.trim()).map((a) => `attribute :>> ${a.name} = ${form.values[a.name].trim()};`),
+          `${formComp.kind} ${form.name || "…"} : ${ref(formComp.qualifiedName, scope)}`,
+          fields(formComp)
+            .filter((a) => form.values[a.name]?.trim())
+            .map((a) => `${formComp.params.includes(a) ? "in" : "attribute"} :>> ${a.name} = ${form.values[a.name].trim()};`),
           form.doc
         )
       : "";
   const compPreview = compForm
     ? partText(
-        `${compForm.abstract ? "abstract " : ""}#${ref(catalog?.tags.Component || "Component", compForm.package)} part def ${compForm.name || "…"}${compForm.specializes ? ` :> ${ref(compForm.specializes, compForm.package)}` : ""}`,
+        `${compForm.abstract ? "abstract " : ""}#${ref(catalog?.tags[TAG[compForm.kind]] || TAG[compForm.kind], compForm.package)} ${compForm.kind} def ${compForm.name || "…"}${compForm.specializes ? ` :> ${ref(compForm.specializes, compForm.package)}` : ""}`,
         [
+          // a behavior's own parameters redefine the inherited ones by position: those are restated first
+          ...(compForm.kind === "action" && compForm.params.some((p) => p.name.trim()) ? byQn.get(compForm.specializes)?.params || [] : []).map((p) => `in :>> ${p.name};`),
+          ...(compForm.kind === "action" ? compForm.params : []).filter((p) => p.name.trim()).map((p) => `in ${p.name.trim()}${p.type.trim() ? ` : ${p.type.trim()}` : ""};`),
           ...compForm.attributes.filter((a) => a.name.trim()).map((a) => `attribute ${a.name.trim()}${a.type.trim() ? ` : ${a.type.trim()}` : ""};`),
-          ...compForm.ports.filter((p) => p.name.trim()).map((p) => `port ${p.name.trim()}${p.type.trim() ? ` : ${p.type.trim()}` : ""};`),
+          ...(compForm.kind === "part" ? compForm.ports : []).filter((p) => p.name.trim()).map((p) => `port ${p.name.trim()}${p.type.trim() ? ` : ${p.type.trim()}` : ""};`),
         ],
         compForm.doc
       ).replace(/;$/, " {\n}")
@@ -170,26 +187,39 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
         <button className="primary" disabled={!concrete.length || busy} onClick={() => newInstance(comp)}>
           + New instance
         </button>
-        <button disabled={!catalog.tags.Component || busy} onClick={newComponent} title={catalog.tags.Component ? "Declare a new #Component part def" : "No 'metadata def Component' in this project"}>
+        <button disabled={!catalog.tags.Component || busy} onClick={() => newComponent("part")} title={catalog.tags.Component ? "Declare a new #Component part def" : "No 'metadata def Component' in this project"}>
           + New component
         </button>
-        <input className="lib-filter" placeholder="Filter components and instances" value={filter} onChange={(e) => setFilter(e.target.value)} />
+        {catalog.tags.Behavior && (
+          <button disabled={busy} onClick={() => newComponent("action")} title="Declare a new #Behavior action def: a mission step">
+            + New behavior
+          </button>
+        )}
+        <input className="lib-filter" placeholder="Filter types and instances" value={filter} onChange={(e) => setFilter(e.target.value)} />
         {loading && <span className="hint">Refreshing…</span>}
         {dirty && <span className="hint">Unsaved edits are saved before a change.</span>}
       </div>
       {error && <div className="error-box">{error}</div>}
       {form && (
         <div className="form-card">
-          <div className="strong">{form.replace ? `Edit instance ${short(form.replace)}` : "New component instance"}</div>
+          <div className="strong">{form.replace ? `Edit instance ${short(form.replace)}` : `New ${formComp?.kind === "action" ? "behavior" : "component"} instance`}</div>
           <div className="grid3">
             <label>
-              Component
+              {formComp?.kind === "action" ? "Behavior" : "Component"}
               <select value={form.component} onChange={(e) => setForm({ ...form, component: e.target.value, values: {} })}>
-                {concrete.map((c) => (
-                  <option key={c.id} value={c.qualifiedName}>
-                    {c.name}
-                  </option>
-                ))}
+                {KINDS.map(([kind, label]) =>
+                  concrete.some((c) => c.kind === kind) ? (
+                    <optgroup key={kind} label={label}>
+                      {concrete
+                        .filter((c) => c.kind === kind)
+                        .map((c) => (
+                          <option key={c.id} value={c.qualifiedName}>
+                            {c.name}
+                          </option>
+                        ))}
+                    </optgroup>
+                  ) : null
+                )}
               </select>
             </label>
             <label>
@@ -211,15 +241,21 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
             Description
             <input value={form.doc} placeholder="1.6 l four-cylinder" onChange={(e) => setForm({ ...form, doc: e.target.value })} />
           </label>
+          {formComp?.kind === "action" && <div className="hint">Set every parameter: a system instance can only perform a behavior instance whose parameters all have values.</div>}
           <div className="params">
-            {formComp?.attributes.map((a) => (
-              <label key={a.name}>
-                <span>
-                  {a.name} <span className="mono">: {a.type || "?"}</span>
-                </span>
-                <input className="mono" value={form.values[a.name] || ""} placeholder={a.value ? `= ${a.value} (default)` : placeholder(a.type)} onChange={(e) => setForm({ ...form, values: { ...form.values, [a.name]: e.target.value } })} />
-              </label>
-            ))}
+            {formComp &&
+              fields(formComp).map((a) => {
+                const unset = formComp.kind === "action" && !a.value && !form.values[a.name]?.trim();
+                return (
+                  <label key={a.name}>
+                    <span>
+                      {a.name} <span className="mono">: {a.type || "?"}</span>
+                      {unset && <span className="error-text small"> required</span>}
+                    </span>
+                    <input className={`mono${unset ? " invalid" : ""}`} value={form.values[a.name] || ""} placeholder={a.value ? `= ${a.value} (default)` : placeholder(a.type)} onChange={(e) => setForm({ ...form, values: { ...form.values, [a.name]: e.target.value } })} />
+                  </label>
+                );
+              })}
           </div>
           <code className="block">{instancePreview}</code>
           <div className="row-end">
@@ -234,17 +270,17 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
 
       {compForm && (
         <div className="form-card">
-          <div className="strong">New component</div>
+          <div className="strong">New {compForm.kind === "action" ? "behavior" : "component"}</div>
           <div className="grid3">
             <label>
               Name
-              <input value={compForm.name} placeholder="Radiator" onChange={(e) => setCompForm({ ...compForm, name: e.target.value })} className={compForm.name && !NAME_RE.test(compForm.name) ? "invalid" : ""} />
+              <input value={compForm.name} placeholder={compForm.kind === "action" ? "Survey" : "Radiator"} onChange={(e) => setCompForm({ ...compForm, name: e.target.value })} className={compForm.name && !NAME_RE.test(compForm.name) ? "invalid" : ""} />
             </label>
             <label>
               Specializes
               <select value={compForm.specializes} onChange={(e) => setCompForm({ ...compForm, specializes: e.target.value })}>
                 <option value="">—</option>
-                {components.map((c) => (
+                {components.filter((c) => c.kind === compForm.kind).map((c) => (
                   <option key={c.id} value={c.qualifiedName}>
                     {c.name}
                   </option>
@@ -272,14 +308,15 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
             </label>
           </div>
           <div className="grid2">
-            <FeatureRows label="Attributes" typeHint="MassValue" rows={compForm.attributes} onChange={(attributes) => setCompForm({ ...compForm, attributes })} />
-            <FeatureRows label="Ports" typeHint="~FuelPort" rows={compForm.ports} onChange={(ports) => setCompForm({ ...compForm, ports })} />
+            {compForm.kind === "action" && <FeatureRows label="Parameters" typeHint="Real" rows={compForm.params} onChange={(params) => setCompForm({ ...compForm, params })} />}
+            <FeatureRows label={compForm.kind === "action" ? "Quantities (set by mission steps)" : "Attributes"} typeHint={compForm.kind === "action" ? "Real" : "MassValue"} rows={compForm.attributes} onChange={(attributes) => setCompForm({ ...compForm, attributes })} />
+            {compForm.kind === "part" && <FeatureRows label="Ports" typeHint="~FuelPort" rows={compForm.ports} onChange={(ports) => setCompForm({ ...compForm, ports })} />}
           </div>
           <code className="block">{compPreview}</code>
           <div className="row-end">
             <button onClick={() => setCompForm(null)}>Cancel</button>
             <button className="primary" disabled={busy || !NAME_RE.test(compForm.name) || !compForm.package} onClick={saveComponent}>
-              {busy ? "Saving…" : "Add component"}
+              {busy ? "Saving…" : compForm.kind === "action" ? "Add behavior" : "Add component"}
             </button>
           </div>
         </div>
@@ -296,24 +333,34 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
             A component is a <code>part def</code> tagged with the <code>#Component</code> metadata. Its instances — part usages that give its attributes values — make up the catalog that system architectures are configured from.
           </p>
           <code className="block">{`metadata def Component;\n\n#Component part def Engine {\n    attribute mass : MassValue;\n    port torqueOut : TorquePort;\n}\n\npackage Catalog {\n    part i4Engine : Engine { attribute :>> mass = 140 [SI::kg]; }\n}`}</code>
-          <p className="muted small">Create a model from the “Component library” template (Model ▸ +), or open the “Product Line” demo project.</p>
+          <p className="muted small">Create a model from the “Component library” template (Model ▸ +), or open the “Delivery Drones” demo project.</p>
         </div>
       ) : (
         <div className="lib-split">
           <div className="lib-list">
-            {visible.map(({ c, depth }) => (
-              <div key={c.id} className={`lib-item${comp?.id === c.id ? " on" : ""}`} style={{ paddingLeft: 8 + depth * 14 }} onClick={() => setSelected(c.qualifiedName)}>
-                <span className={c.isAbstract ? "em" : ""}>{depth > 0 && <span className="muted">↳ </span>}{c.name}</span>
-                <span className="count">{instances.filter((i) => i.component === c.qualifiedName).length || ""}</span>
-              </div>
-            ))}
+            {KINDS.map(([kind, label]) => {
+              const rows = visible.filter(({ c }) => c.kind === kind);
+              if (!rows.length) return null;
+              return (
+                <div key={kind}>
+                  {hasBehaviors && <div className="lib-group">{label}</div>}
+                  {rows.map(({ c, depth }) => (
+                    <div key={c.id} className={`lib-item${comp?.id === c.id ? " on" : ""}`} style={{ paddingLeft: 8 + depth * 14 }} onClick={() => setSelected(c.qualifiedName)}>
+                      <span className={c.isAbstract ? "em" : ""}>{depth > 0 && <span className="muted">↳ </span>}{c.name}</span>
+                      <span className="count">{instances.filter((i) => i.component === c.qualifiedName).length || ""}</span>
+                    </div>
+                  ))}
+                </div>
+              );
+            })}
           </div>
           {comp && (
             <div className="lib-detail">
               <div className="detail-head">
                 <div>
                   <div className="muted small">
-                    {comp.isAbstract ? "abstract " : ""}component · {comp.modelName} · {comp.package}
+                    {comp.isAbstract ? "abstract " : ""}
+                    {comp.kind === "action" ? "behavior" : "component"} · {comp.modelName} · {comp.package}
                   </div>
                   <div className="title">
                     {comp.name}
@@ -325,6 +372,9 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
                   Show in editor
                 </button>
               </div>
+              {comp.kind === "action" ? (
+                <BehaviorFeatures comp={comp} />
+              ) : (
               <div className="lib-cols">
                 <div>
                   <div className="section-title">Attributes</div>
@@ -347,7 +397,7 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
                     </tbody>
                   </table>
                 </div>
-                <div>
+                {comp.kind === "part" && <div>
                   <div className="section-title">Ports</div>
                   <div className="chips">
                     {comp.ports.map((p) => (
@@ -370,15 +420,17 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
                       </div>
                     </>
                   )}
-                </div>
+                </div>}
               </div>
+              )}
 
               <div className="section-title row-between">
                 <span>
-                  Instances {comp.isAbstract && <span className="muted small">(of its specializations)</span>}
+                  Instances {comp.isAbstract && comp.kind === "part" && <span className="muted small">(of its specializations)</span>}
+                  {comp.kind === "action" && <span className="muted small"> (performance profiles systems can perform)</span>}
                 </span>
                 <button disabled={busy || !concrete.some((x) => family(comp).has(x.qualifiedName))} onClick={() => newInstance(comp)}>
-                  + New {comp.isAbstract ? "" : comp.name} instance
+                  + New {comp.isAbstract && comp.kind === "part" ? "" : comp.name} instance
                 </button>
               </div>
               <InstanceTable comp={comp} rows={shown} selected={form?.replace || null} busy={busy} onEdit={editInstance} onDelete={deleteInstance} onOpen={onOpen} />
@@ -390,6 +442,51 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
     </div>
   );
 }
+
+const TAG = { part: "Component", action: "Behavior" } as const;
+
+/** what an instance form sets: a behavior's parameters, a component's attributes */
+const fields = (c: Component) => (c.kind === "action" ? c.params : c.attributes);
+
+/** a behavior's parameters (set by the performing system), quantities (set by mission steps) and derived attributes */
+function BehaviorFeatures({ comp }: { comp: Component }) {
+  const groups: [string, string, CatalogAttribute[]][] = [
+    ["Parameters", "set by the system instance that performs it", comp.params],
+    ["Quantities", "set by each mission step", comp.attributes.filter((a) => !a.value)],
+    ["Derived", "", comp.attributes.filter((a) => a.value)],
+  ];
+  return (
+    <div className="lib-cols three">
+      {groups.map(([title, hint, rows]) => (
+        <div key={title}>
+          <div className="section-title" title={hint}>
+            {title} {hint && <span className="muted small">· {hint}</span>}
+          </div>
+          <table className="table compact">
+            <tbody>
+              {rows.map((a) => (
+                <tr key={a.name}>
+                  <td className="mono">{a.name}</td>
+                  <td className="mono muted">{a.type || "—"}</td>
+                  <td className="small muted">{a.value ? <code>= {a.value}</code> : a.declaredIn !== comp.qualifiedName ? `from ${short(a.declaredIn)}` : ""}</td>
+                </tr>
+              ))}
+              {!rows.length && (
+                <tr>
+                  <td className="muted">none</td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
+  );
+}
+const KINDS = [
+  ["part", "Components"],
+  ["action", "Behaviors"],
+] as const;
 
 function InstanceTable({
   comp,
@@ -409,7 +506,8 @@ function InstanceTable({
   onOpen(i: ComponentInstance): void;
 }) {
   const cols = useMemo(() => {
-    const names = comp.attributes.map((a) => a.name);
+    const names = fields(comp).map((a) => a.name);
+    if (comp.kind === "action") return names; // its quantities and derived attributes belong to mission steps
     for (const r of rows) for (const k of Object.keys(r.values)) if (!names.includes(k)) names.push(k);
     return names;
   }, [comp, rows]);
@@ -436,6 +534,7 @@ function InstanceTable({
               <td>
                 <div className="strong mono">{r.name}</div>
                 {r.doc && <div className="muted small">{r.doc}</div>}
+                {r.missing.length > 0 && <span className="pill warn" title="A system instance cannot perform it until every parameter is set">incomplete: {r.missing.join(", ")}</span>}
               </td>
               {mixed && <td className="small">{short(r.component)}</td>}
               {cols.map((c) => (

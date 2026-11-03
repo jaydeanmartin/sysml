@@ -37,11 +37,10 @@ docker compose up --build
 # open http://localhost:8080
 ```
 
-On first start the model service creates three demo projects:
+On first start the model service creates two demo projects:
 
 - **Demo / Vehicle** ([`examples/vehicle.sysml`](examples/vehicle.sysml)) covers requirements, part and port definitions, connections, instances, an action, a state machine, and calcs/analyses that run over REST.
-- **Product Line** has a component library ([`examples/component_library.sysml`](examples/component_library.sysml)) and system architectures with configured system instances ([`examples/architectures.sysml`](examples/architectures.sysml)).
-- **Delivery Drones** is a configurable parcel delivery drone. Its library ([`examples/drone_library.sysml`](examples/drone_library.sysml)) has frames from 450 to 1600 mm, six batteries, four motors, four propellers, and parcel boxes and winches carrying 1 to 15 kg. The quad, hexa and octo architectures ([`examples/drone_architectures.sysml`](examples/drone_architectures.sysml)) set the number of rotors through the multiplicity of the `motors` and `propellers` slots (`part :>> motors[6];`). Each architecture derives takeoff mass, thrust-to-weight, hover power, endurance and propeller-tip clearance from the parts chosen. Six requirement defs check every drone. Of the six configured drones, `parcel`, `regional` and `heavyLift` pass every check. `courier`, `parcelLongRange` and `regionalLiIon` each fail one or two, for different reasons.
+- **Delivery Drones** is a configurable parcel delivery drone. Its library ([`examples/drone_library.sysml`](examples/drone_library.sysml)) has frames from 450 to 1600 mm, six batteries, four motors, four propellers, and parcel boxes and winches carrying 1 to 15 kg. The quad, hexa and octo architectures ([`examples/drone_architectures.sysml`](examples/drone_architectures.sysml)) set the number of rotors through the multiplicity of the `motors` and `propellers` slots (`part :>> motors[6];`). Each architecture derives takeoff mass, thrust-to-weight, hover power, endurance and propeller-tip clearance from the parts chosen. Six requirement defs check every drone. Of the six configured drones, `parcel`, `regional` and `heavyLift` pass every check. `courier`, `parcelLongRange` and `regionalLiIon` each fail one or two, for different reasons. The library also declares abstract behaviors with parameters: takeoff, cruise, hover, winch, landing and drop-off. Its behavior catalog holds performance profiles, such as `cruise12` (12 m/s, power factor 1.1). Every architecture performs takeoff, cruise, hover, land and release; the Octocopter also performs winch lowering. Each drone performs a profile for each of them. The four delivery missions ([`examples/drone_missions.sysml`](examples/drone_missions.sysml)) are ordered lists of behaviors with distances and altitudes. Each drone flies a mission with its own profiles, and a mission energy requirement checks the result. All six drones can fly `shortHop`. Only `parcelLongRange` has the battery for `rural`. Only `heavyLift` can fly `winchDrop`, because it is the only drone that performs winch lowering.
 
 Things to try in the UI. The left sidebar opens each panel; **«** collapses it to icons. Its **Editor** item shows or minimizes the text editor.
 
@@ -50,8 +49,9 @@ Things to try in the UI. The left sidebar opens each panel; **«** collapses it 
 3. **Requirements panel.** Capture a requirement with the form; the SysML text is inserted for you. **Check all satisfy relations** runs every `satisfy`. `sedan.mass` and `sedan.range` are computed by REST analyses during that check.
 4. **Execute panel.** Run `VehicleModel::sedanCooling`. This analysis case calls the external `thermalSolver` endpoint. The panel lists every REST call made during the run. Running `VehicleModel::Drive` or `VehicleStates` plays back the execution trace in both the diagram and the editor.
 5. **Analyses panel.** Register an external endpoint or a formula. **Insert SysML binding** generates a `calc def` with the `ToolExecution` metadata that binds to it.
-6. **Library panel** (Product Line or Delivery Drones project). Browse the component types and their catalog instances. **+ New instance** creates an instance from a form with one field per attribute. You can also edit or delete instances and declare new components.
-7. **Configurator panel.** Pick a system architecture and fill each slot with a compatible catalog instance, then create the system instance. **Evaluate & check requirements** computes every system instance's derived attributes and checks each applicable requirement def against it, in one run.
+6. **Library panel** (Delivery Drones project). Browse the component types, the behaviors and their catalog instances. **+ New instance** creates an instance from a form with one field per attribute, or one per parameter for a behavior. A behavior instance is incomplete until every parameter is set (see `cruiseSport`). You can also edit or delete instances and declare new components and behaviors.
+7. **Configurator panel.** Pick a system architecture. Fill each part slot with a compatible catalog instance, and choose a complete behavior instance for every behavior the architecture performs. Then create the system instance. **Evaluate & check requirements** computes every system instance's derived attributes and checks each applicable requirement def against it, in one run.
+8. **Missions panel.** Build a mission by clicking behaviors in the order they are performed, then set each step's quantities (distance, altitude…). Reorder steps with ↑ ↓ and change a step's behavior from its drop-down. **Evaluate & check missions** flies every mission with every drone and checks the mission requirements. The mission being edited then shows each drone's verdict, plus the step durations and a timeline for the drone you pick under **Flown by**.
 
 ## Component library and system configuration
 
@@ -92,6 +92,55 @@ package Configurations {
 - The catalog is built from a single parse of all the project's models, so the library and the architectures can live in different models. Use the **Component library** and **System architecture** templates when you create a model.
 - Every change saves a new version of the model that declares the element. The service refuses a change that would add an error, for example a value with an unknown unit, or deleting an instance that a system instance still uses.
 - Evaluation is a single `evaluate` run per model. It uses `system.attribute` for each derived attribute and `Requirement(system)` for each requirement def whose subject type the architecture conforms to. A new system instance gets verdicts without any `satisfy` statements.
+
+### Behaviors and missions
+
+Missions use two more metadata tags, `#Behavior` and `#Mission`:
+
+```sysml
+abstract #Behavior action def Cruise :> DroneBehavior {   // an abstract behavior
+    in :>> powerFactor;                         // restate inherited parameters first (see below)
+    in speed : Real;                            // a parameter: set by the system that performs it
+    attribute :>> distance;                     // a quantity (no value): set by each mission step
+    attribute :>> duration = distance / speed;  // derived
+}
+package Behaviors {
+    action cruise12 : Cruise { in :>> powerFactor = 1.1; in :>> speed = 12; }   // a behavior instance
+}
+
+#SystemArchitecture part def Quadcopter :> DeliveryDrone {
+    perform action cruise : Cruise;             // a behavior slot
+}
+part parcel : Quadcopter {
+    perform action :>> cruise :> Behaviors::cruise12;   // every behavior slot is required
+}
+
+#Mission action def DeliveryMission {           // a mission type
+    attribute duration : Real;                  // totals: summed over the steps
+    attribute hoverTime : Real;
+}
+requirement def MissionEnergyRequirement {      // a mission requirement
+    subject drone : DeliveryDrone;
+    in hoverTime : Real;                        // named like a total
+    require constraint { drone.hoverPower * hoverTime / 3600 <= drone.battery.energy * 0.8 }
+}
+package Missions {
+    action shortHop : DeliveryMission {         // a mission: ordered steps,
+        first start;                            // each an abstract behavior with its quantities set
+        then action takeoff : Takeoff { attribute :>> altitude = 30; }
+        then action cruise : Cruise { attribute :>> distance = 2000; }
+        then done;
+    }
+}
+```
+
+- A behavior's `in` parameters describe how a system performs it. Its attributes without a value are quantities that each mission step sets. Its other attributes are derived.
+- A behavior instance is complete when every parameter has a value. Only complete instances can be performed. The service refuses a system instance that leaves a behavior slot empty or chooses an incomplete instance.
+- In SysML v2, a specialized behavior's own parameters redefine the inherited ones *by position*. A behavior that adds parameters therefore restates the inherited ones first (`in :>> powerFactor;`). **+ New behavior** writes those lines for you.
+- To fly a step, a system instance uses the behavior it performs for the step's behavior type. That is the slot whose type is the step's behavior or a behavior it specializes. The flown step is an action that subsets both the performed behavior and the step, `action f1 :> Configurations::parcel.cruise, Missions::shortHop.cruise;`. It takes its parameters from the performed behavior and its quantities from the step, so its derived attributes evaluate with both. If the system performs no behavior of a step's type, it cannot fly the mission.
+- A mission's totals are the sums of the same-named attributes over the flown steps, so they depend on the system flying it. Missions on their own cannot run in the Execute panel, because their steps have no parameters until a system flies them.
+- A mission requirement is a requirement def with `in` parameters. It applies to every system instance whose architecture conforms to its subject type, if each parameter is named like a total of the mission type. It is checked as `Requirement(system, total, …)`. The Configurator leaves mission requirements out of its own checks.
+- **Evaluate & check missions** calls `POST /projects/{id}/catalog/missions/evaluate`. The service writes the flown steps of every mission and drone into a scratch package. It then evaluates them with the project's models in a single run and stores nothing.
 
 ## How a model calls REST analyses during execution
 
@@ -146,10 +195,12 @@ Interactive OpenAPI docs are served at `/docs` on each service, e.g. http://loca
 - `GET /models/{id}/requirements`: text, constraints, subject, satisfied-by, latest verdict
 - `POST /models/{id}/runs`: `{"kind": "calc|analysis|requirement|constraint|satisfy|action|state|evaluate|validate", "target", "args", "subject", "expression", "advance"}`
 - `GET /models/{id}/runs`, `GET /runs/{id}` (includes the REST calls made during the run)
-- `GET /projects/{id}/catalog`: components, instances, architectures (slots with compatible instances, applicable requirements), system instances
+- `GET /projects/{id}/catalog`: components and behaviors, instances, architectures (slots with compatible instances, applicable requirements and mission requirements), system instances, mission types, missions
 - `POST /projects/{id}/catalog/instances` `{"component", "name", "values": {attr: expr}, "doc"?, "package"?, "replace"?}`
-- `POST /projects/{id}/catalog/configurations` `{"architecture", "name", "assignments": {slot: instance}, "doc"?, "package"?, "replace"?}`
-- `POST /projects/{id}/catalog/components` `{"name", "package", "specializes"?, "abstract"?, "attributes": [{name, type}], "ports": [...]}`
+- `POST /projects/{id}/catalog/configurations` `{"architecture", "name", "assignments": {slot: instance}, "behaviors": {behavior slot: behavior instance}, "doc"?, "package"?, "replace"?}`
+- `POST /projects/{id}/catalog/components` `{"name", "package", "kind"?: "part" | "action", "specializes"?, "abstract"?, "attributes": [{name, type}], "ports": [...], "params"?: [...]}`
+- `POST /projects/{id}/catalog/missions` `{"missionType", "name", "steps": [{"behavior", "values": {quantity: expr}}], "doc"?, "package"?, "replace"?}`
+- `POST /projects/{id}/catalog/missions/evaluate` `{"missionType", "draft"?: [steps]}`: every mission (and the draft) flown by every system instance that performs behaviors: per-step values, totals, mission requirement verdicts, or why it cannot be flown
 - `DELETE /projects/{id}/catalog/elements?qualifiedName=`
 
 **SysML v2 API** (Systems Modeling API and Services 1.0, REST/HTTP PSM): base URL `http://localhost:8001/sysml-v2`, or `http://localhost:8080/api/sysml-v2` through the gateway

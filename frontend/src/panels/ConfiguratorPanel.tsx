@@ -8,6 +8,8 @@ interface Draft {
   doc: string;
   package: string;
   assignments: Record<string, string | null>;
+  /** behavior slot -> behavior instance performed */
+  behaviors: Record<string, string | null>;
   /** qualified name of the system instance being edited; null for a new one */
   replace: string | null;
 }
@@ -44,9 +46,23 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
     const base = lowerFirst(a.name);
     let n = 1;
     while (catalog?.configurations.some((c) => c.name === `${base}${n}`)) n++;
-    return { name: `${base}${n}`, doc: "", package: "", assignments: Object.fromEntries(a.slots.map((s) => [s.name, null])), replace: null };
+    return {
+      name: `${base}${n}`,
+      doc: "",
+      package: "",
+      assignments: Object.fromEntries(a.slots.map((s) => [s.name, null])),
+      behaviors: Object.fromEntries(a.behaviors.map((b) => [b.name, null])),
+      replace: null,
+    };
   };
-  const fromConfig = (c: SystemConfiguration): Draft => ({ name: c.name, doc: c.doc || "", package: c.package || "", assignments: { ...c.assignments }, replace: c.qualifiedName });
+  const fromConfig = (c: SystemConfiguration): Draft => ({
+    name: c.name,
+    doc: c.doc || "",
+    package: c.package || "",
+    assignments: { ...c.assignments },
+    behaviors: { ...c.behaviors },
+    replace: c.qualifiedName,
+  });
 
   // keep the form in step with the catalog (it is re-read after every save)
   useEffect(() => {
@@ -91,6 +107,7 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
         doc: draft.doc,
         package: draft.replace ? null : draft.package || null,
         assignments: draft.assignments,
+        behaviors: draft.behaviors,
         replace: draft.replace,
       })
     );
@@ -157,7 +174,7 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
             A system architecture is a <code>part def</code> tagged <code>#SystemArchitecture</code>. Each of its part usages typed by a component is a <em>slot</em>; a system instance fills every slot with an instance from the component library.
           </p>
           <code className="block">{`#SystemArchitecture part def Car {\n    part engine : Engine;\n    part tank : FuelTank;\n    connect tank.fuelOut to engine.fuelIn;\n    attribute mass : MassValue = engine.mass + tank.mass;\n}\n\npart economy : Car {\n    part :>> engine :> Catalog::i4Engine;\n    part :>> tank :> Catalog::tank45;\n}`}</code>
-          <p className="muted small">Create a model from the “System architecture” template (Model ▸ +), or open the “Product Line” demo project.</p>
+          <p className="muted small">Create a model from the “System architecture” template (Model ▸ +), or open the “Delivery Drones” demo project.</p>
         </div>
       </div>
     );
@@ -168,12 +185,23 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
     arch && draft
       ? partText(
           `part ${draft.name || "…"} : ${ref(arch.qualifiedName, scope)}`,
-          arch.slots.filter((s) => draft.assignments[s.name]).map((s) => `part :>> ${s.name} :> ${ref(draft.assignments[s.name]!, scope)};`),
+          [
+            ...arch.slots.filter((s) => draft.assignments[s.name]).map((s) => `part :>> ${s.name} :> ${ref(draft.assignments[s.name]!, scope)};`),
+            ...arch.behaviors.filter((b) => draft.behaviors[b.name]).map((b) => `perform action :>> ${b.name} :> ${ref(draft.behaviors[b.name]!, scope)};`),
+          ],
           draft.doc
         )
       : "";
   const current = draft?.replace ? configs.find((c) => c.qualifiedName === draft.replace) : undefined;
-  const changed = !current || !draft || draft.name !== current.name || draft.doc !== (current.doc || "") || arch!.slots.some((s) => (draft.assignments[s.name] || null) !== (current.assignments[s.name] || null));
+  const changed =
+    !current ||
+    !draft ||
+    draft.name !== current.name ||
+    draft.doc !== (current.doc || "") ||
+    arch!.slots.some((s) => (draft.assignments[s.name] || null) !== (current.assignments[s.name] || null)) ||
+    arch!.behaviors.some((b) => (draft.behaviors[b.name] || null) !== (current.behaviors[b.name] || null));
+  // every behavior the architecture performs needs a complete behavior instance
+  const unperformed = arch && draft ? arch.behaviors.filter((b) => !draft.behaviors[b.name]).map((b) => b.name) : [];
 
   return (
     <div className="panel lib">
@@ -312,11 +340,64 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
                     })}
                   </tbody>
                 </table>
+                {arch.behaviors.length > 0 && (
+                  <table className="table compact slots">
+                    <thead>
+                      <tr>
+                        <th>Performs</th>
+                        <th>Behavior instance</th>
+                        <th>Parameters</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {arch.behaviors.map((b) => {
+                        const cands = b.candidates.map((id) => instById.get(id)).filter((i): i is ComponentInstance => !!i);
+                        // incomplete instances of the type are listed, disabled, so it is clear why they cannot be chosen
+                        const incomplete = (catalog.instances || []).filter((i) => i.kind === "action" && i.missing.length && !b.candidates.includes(i.id) && i.component === b.type);
+                        const chosen = draft.behaviors[b.name] ? instByQn.get(draft.behaviors[b.name]!) : undefined;
+                        return (
+                          <tr key={b.name}>
+                            <td>
+                              <div className="mono strong">{b.name}</div>
+                              <div className="mono muted small">: {short(b.type)}</div>
+                            </td>
+                            <td>
+                              <select className={draft.behaviors[b.name] ? "" : "invalid"} value={draft.behaviors[b.name] || ""} onChange={(e) => setDraft({ ...draft, behaviors: { ...draft.behaviors, [b.name]: e.target.value || null } })}>
+                                <option value="">{cands.length ? "— choose (required) —" : "— no complete instance fits —"}</option>
+                                {cands.map((i) => (
+                                  <option key={i.id} value={i.qualifiedName}>
+                                    {i.name}
+                                    {i.component !== b.type ? ` (${short(i.component)})` : ""}
+                                    {i.doc ? ` — ${i.doc}` : ""}
+                                  </option>
+                                ))}
+                                {incomplete.map((i) => (
+                                  <option key={i.id} value={i.qualifiedName} disabled>
+                                    {i.name} — incomplete: no {i.missing.join(", ")}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td className="mono small muted">
+                              {chosen
+                                ? Object.entries(chosen.values)
+                                    .filter(([k]) => chosen.ownValues[k] !== undefined)
+                                    .map(([k, v]) => `${k} ${v}`)
+                                    .join(" · ")
+                                : ""}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                )}
                 <code className="block">{preview}</code>
                 <div className="row-end">
+                  {unperformed.length > 0 && <span className="hint">Choose a behavior for {unperformed.join(", ")}: a {arch.name} must perform every behavior.</span>}
                   {open > 0 && <span className="hint">{open} slot{open > 1 ? "s" : ""} left open (kept as the architecture declares {open > 1 ? "them" : "it"}).</span>}
                   {draft.replace && changed && <button onClick={() => current && setDraft(fromConfig(current))}>Revert</button>}
-                  <button className="primary" disabled={busy || !NAME_RE.test(draft.name) || !changed} onClick={save}>
+                  <button className="primary" disabled={busy || !NAME_RE.test(draft.name) || !changed || unperformed.length > 0} onClick={save}>
                     {busy ? "Saving…" : draft.replace ? "Save system instance" : "Create system instance"}
                   </button>
                 </div>
@@ -336,6 +417,11 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
                       {arch.slots.map((s) => (
                         <th key={s.name} className="mono">
                           {s.name}
+                        </th>
+                      ))}
+                      {arch.behaviors.map((b) => (
+                        <th key={b.name} className="mono" title={`performs ${short(b.type)}`}>
+                          {b.name}
                         </th>
                       ))}
                       {arch.attributes.map((a) => (
@@ -360,6 +446,11 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
                         {arch.slots.map((s) => (
                           <td key={s.name} className="mono small">
                             {c.assignments[s.name] ? short(c.assignments[s.name]) : <span className="muted">—</span>}
+                          </td>
+                        ))}
+                        {arch.behaviors.map((b) => (
+                          <td key={b.name} className="mono small">
+                            {c.behaviors[b.name] ? short(c.behaviors[b.name]) : <span className="error-text">—</span>}
                           </td>
                         ))}
                         {arch.attributes.map((a) => (

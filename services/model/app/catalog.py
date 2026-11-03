@@ -14,6 +14,38 @@ Nothing here is stored outside the models. The conventions are plain SysML v2:
           part :>> engine :> ComponentLibrary::Catalog::i4Engine;
       }
 
+* a **behavior** is an (abstract) ``action def`` tagged ``#Behavior`` (or
+  specializing one). Its ``in`` parameters are *performance parameters*, set by
+  the system that performs it; its attributes without a value are *quantities*,
+  set by each mission step; the rest are derived. Behaviors are listed with the
+  components, with ``kind: "action"``;
+* a **behavior instance** is an action usage declared in a package and typed by
+  a behavior; it is *complete* when every parameter has a value::
+
+      action cruise12 : Cruise { in :>> speed = 12; in :>> powerFactor = 1.1; }
+
+* an architecture's ``perform action`` usages typed by a behavior are its
+  *behavior slots*; a system instance fills each with a complete behavior
+  instance (``perform action :>> cruise :> Behaviors::cruise12;``);
+* a **mission type** is an ``action def`` tagged ``#Mission``; its attributes
+  are *totals*, each the sum of the same-named attribute over the steps;
+* a **mission** is an action usage declared in a package and typed by a mission
+  type; its steps are action usages, in order, typed by a behavior and setting
+  its quantities::
+
+      action shortHop : DeliveryMission {
+          first start;
+          then action takeoff : Takeoff { attribute :>> altitude = 30; }
+          then action cruise : Cruise { attribute :>> distance = 2000; }
+          then done;
+      }
+
+  A system instance flies a step with the behavior it performs for the step's
+  type (see ``flown_step``);
+* a **mission requirement** is a requirement def with ``in`` parameters: it is
+  checked with a system instance as subject and the totals of the mission as
+  flown by that system as arguments.
+
 The catalog is computed from one parse of every model of a project, so the IDs
 and qualified names line up across models. Creating or editing an instance or a
 system instance rewrites the declaring model's text and saves a new version.
@@ -26,6 +58,8 @@ from typing import Any
 
 COMPONENT_TAG = "Component"
 ARCHITECTURE_TAG = "SystemArchitecture"
+BEHAVIOR_TAG = "Behavior"
+MISSION_TAG = "Mission"
 
 NAME_RE = re.compile(r"^[A-Za-z_]\w*$")
 TYPE_RE = re.compile(r"^~?[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*$")
@@ -129,36 +163,53 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]]) -> dict
         }
 
     part_defs = [n for n in graph["nodes"] if n["kind"] == "part def"]
+    action_defs = [n for n in graph["nodes"] if n["kind"] == "action def"]
     component_ids = {n["id"] for n in part_defs if idx.tagged(n["id"], COMPONENT_TAG)}
     arch_ids = {n["id"] for n in part_defs if idx.tagged(n["id"], ARCHITECTURE_TAG)} - component_ids
+    behavior_ids = {n["id"] for n in action_defs if idx.tagged(n["id"], BEHAVIOR_TAG)}
+    mission_ids = {n["id"] for n in action_defs if idx.tagged(n["id"], MISSION_TAG)} - behavior_ids
+    # components and behaviors share the library: instances of either are usages in a package
+    library_ids = component_ids | behavior_ids
 
     def specializations(def_id: str) -> set[str]:
-        return {d["id"] for d in part_defs if def_id in idx.ancestors(d["id"])}
+        return {d["id"] for d in part_defs + action_defs if def_id in idx.ancestors(d["id"])}
+
+    def params(def_id: str) -> list[tuple[dict[str, Any], str]]:
+        return [(p, o) for p, o in idx.features(def_id, ("param",)) if p.get("direction") in ("in", None)]
 
     # ---------------------------------------------------------- instances
     instances = []
     for n in graph["nodes"]:
-        if n["kind"] != "part" or n.get("typeId") not in component_ids or not idx.in_package(n):
+        if n["kind"] not in ("part", "action") or n.get("typeId") not in library_ids or not idx.in_package(n):
             continue
         comp = idx.nodes[n["typeId"]]
-        values = {a["name"]: a["value"] for a, _ in idx.features(comp["id"], ("attribute",)) if a.get("value")}
-        own = {c["name"]: c["value"] for c in idx.children.get(n["id"], []) if c["kind"] == "attribute" and c.get("value")}
+        feats = idx.features(comp["id"], ("attribute",)) + params(comp["id"])
+        values = {a["name"]: a["value"] for a, _ in feats if a.get("value")}
+        own = {c["name"]: c["value"] for c in idx.children.get(n["id"], []) if c["kind"] in ("attribute", "param") and c.get("value")}
+        merged = {**values, **own}
         instances.append(
-            {**located(n), "componentId": comp["id"], "component": _qn(comp), "values": {**values, **own}, "ownValues": own}
+            {
+                **located(n), "kind": n["kind"], "componentId": comp["id"], "component": _qn(comp),
+                "values": merged, "ownValues": own,
+                # performance parameters still without a value: the instance cannot be performed
+                "missing": [p["name"] for p, _ in params(comp["id"]) if p["name"] not in merged],
+            }
         )
     inst_by_id = {i["id"]: i for i in instances}
 
     # ---------------------------------------------------------- components
     components = []
-    for n in part_defs:
-        if n["id"] not in component_ids:
+    for n in part_defs + action_defs:
+        if n["id"] not in library_ids:
             continue
         components.append(
             {
                 **located(n),
+                "kind": "part" if n["kind"] == "part def" else "action",
                 "isAbstract": n.get("isAbstract", False),
                 "specializes": [_qn(idx.nodes[g]) for g in idx.generals.get(n["id"], [])],
                 "attributes": [_attr(a, o, idx) for a, o in idx.features(n["id"], ("attribute",))],
+                "params": [_attr(p, o, idx) for p, o in params(n["id"])],
                 "ports": [
                     {"name": p["name"], "type": p.get("typeName"), "declaredIn": _qn(idx.nodes.get(o))}
                     for p, o in idx.features(n["id"], ("port",))
@@ -178,7 +229,8 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]]) -> dict
             continue
         subject = next((c for c in idx.children.get(n["id"], []) if c["kind"] == "subject"), None)
         if subject and subject.get("typeId"):
-            requirements.append({**located(n), "subject": subject["name"], "subjectTypeId": subject["typeId"]})
+            params = [c["name"] for c in idx.children.get(n["id"], []) if c["kind"] == "param" and c.get("direction") == "in"]
+            requirements.append({**located(n), "subject": subject["name"], "subjectTypeId": subject["typeId"], "params": params})
 
     # ---------------------------------------------------------- architectures
     architectures = []
@@ -202,6 +254,23 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]]) -> dict
                     "candidates": [i["id"] for i in instances if i["componentId"] in accepted],
                 }
             )
+        behaviors = []
+        for p, owner in idx.features(n["id"], ("perform",)):
+            tid = p.get("typeId")
+            if tid not in behavior_ids:
+                continue
+            accepted = specializations(tid)
+            behaviors.append(
+                {
+                    "name": p["name"],
+                    "type": _qn(idx.nodes[tid]),
+                    "typeId": tid,
+                    "doc": p.get("doc"),
+                    "declaredIn": _qn(idx.nodes.get(owner)),
+                    # only complete instances can be performed
+                    "candidates": [i["id"] for i in instances if i["componentId"] in accepted and not i["missing"]],
+                }
+            )
         attributes = [_attr(a, o, idx) for a, o in idx.features(n["id"], ("attribute",))]
         architectures.append(
             {
@@ -209,10 +278,17 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]]) -> dict
                 "isAbstract": n.get("isAbstract", False),
                 "specializes": [_qn(idx.nodes[g]) for g in idx.generals.get(n["id"], [])],
                 "slots": slots,
+                "behaviors": behaviors,
                 "attributes": attributes,
                 "connections": sum(1 for e in graph["edges"] if e.get("context") in idx.ancestors(n["id"])),
                 # requirement defs whose subject this architecture can be: Req(system) evaluates them
-                "requirements": [r["qualifiedName"] for r in requirements if r["subjectTypeId"] in idx.ancestors(n["id"])],
+                "requirements": [
+                    r["qualifiedName"] for r in requirements if r["subjectTypeId"] in idx.ancestors(n["id"]) and not r["params"]
+                ],
+                # ... and those that also take mission totals: Req(system, total, ...)
+                "missionRequirements": [
+                    r["qualifiedName"] for r in requirements if r["subjectTypeId"] in idx.ancestors(n["id"]) and r["params"]
+                ],
             }
         )
     arch_by_id = {a["id"]: a for a in architectures}
@@ -224,15 +300,51 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]]) -> dict
             continue
         arch = arch_by_id[n["typeId"]]
         slot_names = {s["name"] for s in arch["slots"]}
+        behavior_names = {b["name"] for b in arch["behaviors"]}
         assignments: dict[str, str | None] = {}
+        performs: dict[str, str | None] = {b: None for b in behavior_names}
         for c in idx.children.get(n["id"], []):
+            if c["kind"] == "perform" and c["name"] in behavior_names:
+                inst = inst_by_id.get(c.get("subsets") or "")
+                performs[c["name"]] = inst["qualifiedName"] if inst else None
             if c["kind"] != "part" or c["name"] not in slot_names:
                 continue
             inst = inst_by_id.get(c.get("subsets") or "")
             if not inst and c.get("value"):  # binding form: part :>> engine = Catalog::i4;
                 inst = next((i for i in instances if i["qualifiedName"].endswith(c["value"])), None)
             assignments[c["name"]] = inst["qualifiedName"] if inst else None
-        configurations.append({**located(n), "architectureId": arch["id"], "architecture": arch["qualifiedName"], "assignments": assignments})
+        configurations.append(
+            {
+                **located(n), "architectureId": arch["id"], "architecture": arch["qualifiedName"],
+                "assignments": assignments, "behaviors": performs,
+            }
+        )
+
+    # ---------------------------------------------------------- mission types and missions
+    mission_types = []
+    for n in action_defs:
+        if n["id"] not in mission_ids:
+            continue
+        mission_types.append(
+            {
+                **located(n),
+                "isAbstract": n.get("isAbstract", False),
+                "specializes": [_qn(idx.nodes[g]) for g in idx.generals.get(n["id"], [])],
+                "totals": [_attr(a, o, idx) for a, o in idx.features(n["id"], ("attribute",))],
+            }
+        )
+    missions = []
+    for n in graph["nodes"]:
+        if n["kind"] != "action" or n.get("typeId") not in mission_ids or not idx.in_package(n):
+            continue
+        steps = []
+        for c in idx.children.get(n["id"], []):  # document order is the order of the steps
+            if c["kind"] != "action":
+                continue
+            behavior = idx.nodes.get(c.get("typeId") or "")
+            values = {a["name"]: a["value"] for a in idx.children.get(c["id"], []) if a["kind"] == "attribute" and a.get("value")}
+            steps.append({"name": c["name"], "behavior": _qn(behavior) if c.get("typeId") in behavior_ids else None, "values": values})
+        missions.append({**located(n), "missionTypeId": n["typeId"], "missionType": _qn(idx.nodes[n["typeId"]]), "steps": steps})
 
     packages = []
     for n in graph["nodes"]:
@@ -242,13 +354,15 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]]) -> dict
     tags = {
         n["name"]: _qn(n)
         for n in graph["nodes"]
-        if n["kind"] == "metadata def" and n["name"] in (COMPONENT_TAG, ARCHITECTURE_TAG)
+        if n["kind"] == "metadata def" and n["name"] in (COMPONENT_TAG, ARCHITECTURE_TAG, BEHAVIOR_TAG, MISSION_TAG)
     }
     return {
         "components": components,
         "instances": instances,
         "architectures": architectures,
         "configurations": configurations,
+        "missionTypes": mission_types,
+        "missions": missions,
         "requirements": requirements,
         "packages": packages,
         "tags": tags,
@@ -284,7 +398,10 @@ def _body(lines: list[str]) -> list[str]:
     return [f"    {line}" for line in lines]
 
 
-def instance_text(name: str, component_ref: str, values: dict[str, str], doc: str = "") -> list[str]:
+def instance_text(
+    name: str, component_ref: str, values: dict[str, str], doc: str = "", keyword: str = "part", params: frozenset[str] = frozenset()
+) -> list[str]:
+    """A component or behavior instance; values of ``params`` are written as parameter bindings."""
     check_name(name)
     inner = []
     if doc.strip():
@@ -296,13 +413,13 @@ def instance_text(name: str, component_ref: str, values: dict[str, str], doc: st
         if not value:
             continue
         check_expr(value, attr)
-        inner.append(f"attribute :>> {attr} = {value};")
+        inner.append(f"{'in' if attr in params else 'attribute'} :>> {attr} = {value};")
     if not inner:
-        return [f"part {name} : {component_ref};"]
-    return [f"part {name} : {component_ref} {{", *_body(inner), "}"]
+        return [f"{keyword} {name} : {component_ref};"]
+    return [f"{keyword} {name} : {component_ref} {{", *_body(inner), "}"]
 
 
-def configuration_text(name: str, arch_ref: str, assignments: dict[str, str], doc: str = "") -> list[str]:
+def configuration_text(name: str, arch_ref: str, assignments: dict[str, str], doc: str = "", behaviors: dict[str, str] | None = None) -> list[str]:
     check_name(name)
     inner = []
     if doc.strip():
@@ -312,9 +429,58 @@ def configuration_text(name: str, arch_ref: str, assignments: dict[str, str], do
         check_name(slot, "slot")
         if inst_ref:
             inner.append(f"part :>> {slot} :> {inst_ref};")
+    for slot, inst_ref in (behaviors or {}).items():
+        check_name(slot, "behavior")
+        if inst_ref:
+            inner.append(f"perform action :>> {slot} :> {inst_ref};")
     if not inner:
         return [f"part {name} : {arch_ref};"]
     return [f"part {name} : {arch_ref} {{", *_body(inner), "}"]
+
+
+# words that cannot name a step without quotes
+_RESERVED = {"in", "out", "inout", "start", "done", "then", "first", "action", "state", "part", "attribute", "end", "if", "else"}
+
+
+def step_names(behaviors: list[str]) -> list[str]:
+    """Step names of a mission: the behavior's name lower-cased, numbered from its second use."""
+    seen: dict[str, int] = {}
+    out = []
+    for qn in behaviors:
+        name = qn.rsplit("::", 1)[-1]
+        base = name[:1].lower() + name[1:]
+        if base in _RESERVED:
+            base += "Step"
+        seen[base] = seen.get(base, 0) + 1
+        out.append(base if seen[base] == 1 else f"{base}_{seen[base]}")
+    return out
+
+
+def mission_text(name: str, type_ref: str, steps: list[tuple[str, str, dict[str, str]]], doc: str = "") -> list[str]:
+    """A mission: ``steps`` are (step name, behavior reference, quantity -> expression), in order."""
+    check_name(name)
+    inner = []
+    if doc.strip():
+        check_doc(doc)
+        inner.append(f"doc /* {doc.strip()} */")
+    if steps:
+        inner.append("first start;")
+        for step, behavior_ref, values in steps:
+            check_name(step, "step")
+            if not TYPE_RE.match(behavior_ref):
+                raise CatalogError(f"'{behavior_ref}' is not a qualified name")
+            body = []
+            for q, value in values.items():
+                check_name(q, "quantity")
+                value = (value or "").strip()
+                if value:
+                    check_expr(value, f"{step}.{q}")
+                    body.append(f"attribute :>> {q} = {value};")
+            inner.append(f"then action {step} : {behavior_ref}" + (f" {{ {' '.join(body)} }}" if body else ";"))
+        inner.append("then done;")
+    if not inner:
+        return [f"action {name} : {type_ref};"]
+    return [f"action {name} : {type_ref} {{", *_body(inner), "}"]
 
 
 def component_text(
@@ -325,9 +491,12 @@ def component_text(
     ports: list[dict[str, str]],
     doc: str = "",
     abstract: bool = False,
+    keyword: str = "part",
+    params: list[dict[str, str]] | None = None,
+    inherited_params: list[str] | None = None,
 ) -> list[str]:
     check_name(name)
-    head = f"{'abstract ' if abstract else ''}#{tag_ref} part def {name}"
+    head = f"{'abstract ' if abstract else ''}#{tag_ref} {keyword} def {name}"
     if specializes:
         if not TYPE_RE.match(specializes):
             raise CatalogError(f"'{specializes}' is not a qualified name")
@@ -336,7 +505,10 @@ def component_text(
     if doc.strip():
         check_doc(doc)
         inner.append(f"doc /* {doc.strip()} */")
-    for kind, feats in (("attribute", attributes), ("port", ports)):
+    # a behavior's own parameters redefine the inherited ones by position:
+    # restate those first so new parameters come after them
+    inner += [f"in :>> {p};" for p in inherited_params or []] if params else []
+    for kind, feats in (("in", params or []), ("attribute", attributes), ("port", ports)):
         for f in feats:
             fname, ftype = (f.get("name") or "").strip(), (f.get("type") or "").strip()
             if not fname:
@@ -346,6 +518,13 @@ def component_text(
                 raise CatalogError(f"{kind} {fname}: '{ftype}' is not a type name")
             inner.append(f"{kind} {fname}{' : ' + ftype if ftype else ''};")
     return [f"{head} {{", *_body(inner), "}"]
+
+
+def flown_step(name: str, perform_qn: str, step_qn: str) -> str:
+    """A step as a system flies it: an action that is both the system's performed
+    behavior (its parameters) and the mission step (its quantities), so the
+    behavior's derived attributes evaluate with both."""
+    return f"action {name} :> {perform_qn}, {step_qn};"
 
 
 # ------------------------------------------------------------------ text editing
