@@ -11,6 +11,7 @@ export default defineConfig({
       "/api/sysml-v2": { target: "http://localhost:8001", rewrite: (p) => p.replace(/^\/api/, "") },
       "/api/interpreter": { target: "http://localhost:8002", rewrite: (p) => p.replace(/^\/api\/interpreter/, "") },
       "/api/analysis": { target: "http://localhost:8003", rewrite: (p) => p.replace(/^\/api\/analysis/, "") },
+      "/api/geometry": { target: "http://localhost:8004", rewrite: (p) => p.replace(/^\/api\/geometry/, "") },
     },
   },
 });

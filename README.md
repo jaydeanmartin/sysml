@@ -5,7 +5,7 @@ This project lets you write a SysML v2 model as text in the browser and see it d
 ```mermaid
 flowchart LR
   subgraph Browser
-    UI["React UI<br/>editor · live diagrams · requirements · execution"]
+    UI["React UI<br/>editor · live diagrams · requirements · execution · 3-D"]
   end
   UI -->|/api/*| GW["nginx gateway<br/>(frontend container)"]
   GW -->|/api/models| MS["model service :8001<br/>projects · versions · elements · runs"]
@@ -13,6 +13,8 @@ flowchart LR
   CL["SysML v2 API clients<br/>(Jupyter %publish, tools)"] -->|/sysml-v2| MS
   GW -->|/api/analysis| AS["analysis service :8003<br/>registry · REST invoke · call log"]
   GW -->|/api/interpreter| IS["interpreter service :8002<br/>OpenSysML wrapper"]
+  GW -->|/api/geometry| GS["geometry service :8004<br/>glTF of system instances"]
+  GS -->|catalog| MS
   MS -->|parse / execute| IS
   IS -->|spawns| OS[["OpenSysML sysml CLI<br/>(Go, SysML v2 + KerML)"]]
   OS -->|ToolExecution → bridge.py| AS
@@ -23,10 +25,11 @@ flowchart LR
 
 | Service | Port | Responsibility |
 |---|---|---|
-| `frontend` | 8080 | React UI (Vite build) served by nginx. nginx also routes `/api/models`, `/api/sysml-v2`, `/api/interpreter` and `/api/analysis` to the services. |
+| `frontend` | 8080 | React UI (Vite build) served by nginx. nginx also routes `/api/models`, `/api/sysml-v2`, `/api/interpreter`, `/api/analysis` and `/api/geometry` to the services. |
 | `model` | 8001 | Projects and models. Every save is a new, unchangeable version, stored as a commit of the project's SysML v2 API repository. The service serves that repository through the standard SysML v2 API at `/sysml-v2`. Also records runs and serves requirement traceability. |
 | `interpreter` | 8002 | Wraps the OpenSysML binary. Endpoints: validate/parse → diagnostics + diagram graph, execute (calc, analysis case, requirement, constraint, satisfy, action, state machine, expression), and OpenSysML's own rendering (Mermaid, DOT, PlantUML, D2). |
 | `analysis` | 8003 | Registry of analyses (`builtin` Python functions, `formula`, `external` REST endpoints). `POST /analyses/{name}/invoke` runs one. Every call is logged together with the id of the run that made it. |
+| `geometry` | 8004 | Generates 3-D geometry of a system instance as binary glTF 2.0, from the component instances in its slots and their attribute values. It reads the project's catalog from the model service, so it stores nothing. |
 | `demo-external` | 8010 | An example third-party REST analysis (a thermal solver). It is registered in the registry as `thermalSolver`. |
 | `postgres` | 5432 | PostgreSQL 16. The model and analysis services each own a schema. |
 
@@ -52,6 +55,7 @@ Things to try in the UI. The left sidebar opens each panel; **«** collapses it 
 6. **Library panel** (Delivery Drones project). Browse the component types, the behaviors and their catalog instances. **+ New instance** creates an instance from a form with one field per attribute, or one per parameter for a behavior. A behavior instance is incomplete until every parameter is set (see `cruiseSport`). You can also edit or delete instances and declare new components and behaviors.
 7. **Configurator panel.** Pick a system architecture. Fill each part slot with a compatible catalog instance, and choose a complete behavior instance for every behavior the architecture performs. Then create the system instance. **Evaluate & check requirements** computes every system instance's derived attributes and checks each applicable requirement def against it, in one run.
 8. **Missions panel.** Build a mission by clicking behaviors in the order they are performed, then set each step's quantities (distance, altitude…). Reorder steps with ↑ ↓ and change a step's behavior from its drop-down. **Evaluate & check missions** flies every mission with every drone and checks the mission requirements. The mission being edited then shows each drone's verdict, plus the step durations and a timeline for the drone you pick under **Flown by**.
+9. **3-D panel.** Pick a system instance to see its generated geometry. Drag to orbit, scroll to zoom, and click a part to see its component instance (**Show in editor** opens its text). The exploded slider pulls the parts apart. The panel also shows the dimensions and the propeller tip clearance. Overlapping propeller discs are drawn red. The geometry is generated again after every change, so swapping a frame in the Configurator changes the drone on screen.
 
 ## Component library and system configuration
 
@@ -142,6 +146,15 @@ package Missions {
 - A mission requirement is a requirement def with `in` parameters. It applies to every system instance whose architecture conforms to its subject type, if each parameter is named like a total of the mission type. It is checked as `Requirement(system, total, …)`. The Configurator leaves mission requirements out of its own checks.
 - **Evaluate & check missions** calls `POST /projects/{id}/catalog/missions/evaluate`. The service writes the flown steps of every mission and drone into a scratch package. It then evaluates them with the project's models in a single run and stores nothing.
 
+## Geometry
+
+The geometry service (`services/geometry`) turns a system instance into a glTF 2.0 scene. Each part is one mesh. Its glTF node `extras` hold the slot, the element index of a multiple slot, and the component instance with its values. The scene `extras` hold the generator, the metrics (in metres) and any warnings. The service picks a generator from the component types in the architecture's slots:
+
+- **multirotor**: the architecture has slots typed by `Frame`, `Motor` and `Propeller`, or by specializations of them. One arm, motor and propeller is drawn per element of the motor slot (`part :>> motors[6];`), on a circle of the frame's `wheelbase` (mm) in an X layout. Propellers have the propeller's `diameter` (in). Motors are sized from their `mass`. The battery (from its `mass`) sits on the hub. The payload hangs between the landing skids: a box of its `volume` (l), or a winch drum with a tether if it has a `tetherLength`. The service reports the tip clearance between adjacent propellers, the same quantity as the architecture's `propClearance`.
+- **generic**: any other architecture. Each slot element is a box sized by its `mass` and laid out in a grid. An open slot is drawn as a grey placeholder.
+
+The service is plain Python with no geometry libraries: `app/gltf.py` builds the meshes and writes GLB. To support another kind of system, add a generator to `app/generators.py` and choose it in `build()`.
+
 ## How a model calls REST analyses during execution
 
 OpenSysML can hand a calc or action to an outside program instead of running its SysML body. You mark it with `AnalysisTooling::ToolExecution` metadata:
@@ -184,6 +197,10 @@ def stress_check(v):
 ## REST API (summary)
 
 Interactive OpenAPI docs are served at `/docs` on each service, e.g. http://localhost:8001/docs.
+
+**Geometry service**
+- `GET /projects/{id}/geometry.glb?system=QN`: the system instance's scene as binary glTF (`model/gltf-binary`)
+- `GET /projects/{id}/geometry?system=QN`: the same description as JSON, without the meshes (generator, metrics, warnings, parts)
 
 **Model service**
 - `GET/POST /projects`, `DELETE /projects/{id}`
@@ -273,6 +290,7 @@ export DATABASE_URL=postgresql://sysml:sysml@localhost:5432/sysml
 (cd services/interpreter && pip install -r requirements.txt && ANALYSIS_SERVICE_URL=http://localhost:8003 uvicorn app.main:app --port 8002) &
 (cd services/model && pip install -r requirements.txt && INTERPRETER_SERVICE_URL=http://localhost:8002 \
    ANALYSIS_SERVICE_URL=http://localhost:8003 EXAMPLES_DIR=../../examples uvicorn app.main:app --port 8001) &
+(cd services/geometry && pip install -r requirements.txt && MODEL_SERVICE_URL=http://localhost:8001 uvicorn app.main:app --port 8004) &
 (cd frontend && npm install && npm run dev)   # http://localhost:5173 (Vite proxies /api/*)
 ```
 
@@ -285,6 +303,8 @@ The seeded `thermalSolver` points at `http://demo-external:8010`. Outside Docker
 cd services/interpreter && pytest
 # analysis + model tests need PostgreSQL
 DATABASE_URL=postgresql://sysml:sysml@localhost:5432/sysml pytest services/analysis/tests services/model/tests
+# geometry tests need nothing else
+cd services/geometry && pytest
 # or, inside the running stack:
 docker compose exec interpreter pytest
 ```

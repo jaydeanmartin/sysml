@@ -318,3 +318,13 @@ button.link:disabled { color: var(--muted); }
 .toolbar .push-right { margin-left: auto; }
 body.dragging, body.dragging * { cursor: move !important; user-select: none !important; }
 body.resizing, body.resizing * { cursor: nwse-resize !important; user-select: none !important; }
+
+/* ------------------------------------------------------------ 3-D viewer */
+.viewer-wrap { position: relative; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.viewer { height: min(62vh, 640px); min-height: 320px; cursor: grab; }
+.viewer:active { cursor: grabbing; }
+.viewer canvas { display: block; }
+.viewer-caption { position: absolute; left: 10px; top: 8px; background: rgba(255, 255, 255, .85); padding: 2px 8px; border-radius: 6px; pointer-events: none; }
+.viewer-hover { position: absolute; right: 10px; top: 8px; background: #0f172a; color: #fff; padding: 2px 8px; border-radius: 6px; pointer-events: none; }
+.viewer-error { position: absolute; left: 10px; right: 10px; bottom: 10px; margin: 0; }
+.part-list { border: 1px solid var(--line); border-radius: 8px; max-height: 220px; overflow: auto; background: var(--surface-2); }

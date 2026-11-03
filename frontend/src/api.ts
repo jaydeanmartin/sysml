@@ -51,6 +51,7 @@ async function call<T>(url: string, init?: RequestInit & { json?: unknown }): Pr
 const M = "/api/models";
 const A = "/api/analysis";
 const I = "/api/interpreter";
+const G = "/api/geometry";
 
 export const api = {
   projects: () => call<Project[]>(`${M}/projects`),
@@ -101,6 +102,21 @@ export const api = {
       json: { inputs },
     }),
   invocations: (limit = 50) => call<Invocation[]>(`${A}/invocations?limit=${limit}`),
+
+  /** binary glTF of a system instance, from the geometry service */
+  geometry: async (projectId: string, system: string): Promise<ArrayBuffer> => {
+    const res = await fetch(`${G}/projects/${projectId}/geometry.glb?system=${encodeURIComponent(system)}`);
+    if (!res.ok) {
+      let msg = `${res.status} ${res.statusText}`;
+      try {
+        msg = (await res.json()).detail || msg;
+      } catch {
+        /* not json */
+      }
+      throw new ApiError(res.status, msg);
+    }
+    return res.arrayBuffer();
+  },
 
   interpreterHealth: () => call<{ status: string; opensysml: string | null }>(`${I}/health`),
 };

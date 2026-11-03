@@ -415,3 +415,27 @@ export interface ComponentRequest {
   ports: { name: string; type: string }[];
   params?: { name: string; type: string }[];
 }
+
+/** a part of a generated scene (glTF node extras) */
+export interface GeometryPart {
+  name: string;
+  material: string;
+  slot: string;
+  /** element of a multiple slot (0-based), null for a single one */
+  index: number | null;
+  type: string;
+  instance: string | null;
+  component: string | null;
+  values: Record<string, string>;
+}
+
+/** what the geometry service generated for a system instance (glTF scene extras) */
+export interface GeometryInfo {
+  system: string;
+  architecture: string;
+  generator: "multirotor" | "generic";
+  /** lengths in metres */
+  metrics: Record<string, number | null>;
+  warnings: string[];
+  parts: GeometryPart[];
+}
