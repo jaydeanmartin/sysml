@@ -212,7 +212,7 @@ export interface Version {
 }
 
 // ------------------------------------------------------------ component library & configurator
-export type ModelTemplate = "empty" | "vehicle" | "library" | "architecture";
+export type ModelTemplate = "empty" | "library" | "architecture";
 
 /** Where a catalog element is declared. */
 export interface Located {

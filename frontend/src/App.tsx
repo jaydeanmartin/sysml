@@ -702,7 +702,6 @@ export default function App() {
                 <option value="empty">Empty package</option>
                 <option value="library">Component library</option>
                 <option value="architecture">System architecture</option>
-                <option value="vehicle">Vehicle example</option>
               </select>
             </label>
             <div className="row-end">

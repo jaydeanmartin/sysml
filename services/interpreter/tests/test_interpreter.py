@@ -15,11 +15,7 @@ from app.main import app, parse_trace
 
 pytestmark = pytest.mark.skipif(opensysml.binary_path() is None, reason="OpenSysML binary not installed")
 
-EXAMPLE = next(
-    (p / "examples" / "vehicle.sysml").read_text()
-    for p in Path(__file__).resolve().parents
-    if (p / "examples" / "vehicle.sysml").exists()
-)
+EXAMPLE = (Path(__file__).parent / "fixtures" / "vehicle.sysml").read_text()
 client = TestClient(app)
 
 

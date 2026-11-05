@@ -99,7 +99,7 @@ class ModelIn(BaseModel):
     name: str = Field(min_length=1, max_length=120, pattern=r"^[A-Za-z_][\w\- .]*$")
     description: str = ""
     source: str | None = None
-    template: Literal["empty", "vehicle", "library", "architecture"] = "empty"
+    template: Literal["empty", "library", "architecture"] = "empty"
 
 
 class SourceIn(BaseModel):
@@ -296,10 +296,6 @@ def _sync_text_changes(project_id: Any, commit: dict[str, Any]) -> None:
 # are saved in this order, so a model can import the packages of the ones before it
 DEMOS = [
     (
-        "demo", "Demo", "Example vehicle model calling REST analyses during execution",
-        [("Vehicle", "vehicle.sysml", "Vehicle architecture, requirements, behavior and analyses")],
-    ),
-    (
         "delivery-drones", "Delivery Drones", "Configurable multirotor parcel delivery drones",
         [
             ("DroneLibrary", "drone_library.sysml", "Frames, batteries, motors, propellers and payload modules, with their catalog instances"),
@@ -311,10 +307,6 @@ DEMOS = [
 
 
 def _seed_demo() -> None:
-    with db.pool.connection() as c:
-        if not c.execute("SELECT 1 FROM models.seed LIMIT 1").fetchone() and c.execute("SELECT 1 FROM models.project LIMIT 1").fetchone():
-            # a database from before seeds were recorded: it already had its chance at the first demo
-            c.execute("INSERT INTO models.seed (name) VALUES ('demo') ON CONFLICT DO NOTHING")
     for key, project, description, models in DEMOS:
         if not all((EXAMPLES_DIR / f).exists() for _, f, _ in models):
             continue
@@ -435,11 +427,7 @@ def create_model(project_id: uuid.UUID, body: ModelIn) -> dict[str, Any]:
     pkg = "".join(ch if ch.isalnum() or ch == "_" else "_" for ch in body.name)
     source = body.source
     if source is None:
-        example = EXAMPLES_DIR / "vehicle.sysml"
-        if body.template == "vehicle" and example.exists():
-            # rename the package so it does not clash with other models of the project
-            source = example.read_text().replace("package VehicleModel {", f"package {pkg} {{", 1)
-        elif body.template == "library":
+        if body.template == "library":
             source = LIBRARY_TEMPLATE.format(name=pkg)
         elif body.template == "architecture":
             imports = _library_imports(project_id)
