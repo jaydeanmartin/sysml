@@ -3,6 +3,7 @@ import { api } from "../api";
 import type { Architecture, CatalogChange, ComponentInstance, SystemConfiguration } from "../types";
 import { ControlPanel } from "./ControlPanel";
 import { NAME_RE, errorText, partText, ref, short, type CatalogPanelProps } from "./catalogUtil";
+import { reqLabel, useComponentChecks } from "./componentChecks";
 
 interface Draft {
   name: string;
@@ -35,6 +36,7 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
   const [busy, setBusy] = useState(false);
   const [evaluating, setEvaluating] = useState(false);
   const [evals, setEvals] = useState<Record<string, Evaluation>>({});
+  const compChecks = useComponentChecks(projectId, catalog);
 
   const archs = catalog?.architectures || [];
   const arch = archs.find((a) => a.qualifiedName === archQn) || archs[0];
@@ -57,7 +59,11 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
           key: r.qualifiedName,
           label: r.shortName || r.name,
           sub: r.name,
-          doc: [r.doc, r.explicit ? `Applies to ${r.appliesTo.map(short).join(", ")} (satisfy).` : ""].filter(Boolean).join("\n"),
+          doc: [
+            r.doc,
+            r.explicit ? `Applies to ${r.appliesTo.map(short).join(", ")} (satisfy).` : "",
+            ...Object.entries(r.replacedFor || {}).map(([subj, by]) => `Not for ${short(subj)}: it satisfies ${short(by)} instead.`),
+          ].filter(Boolean).join("\n"),
           applies: (q: string) => r.appliesTo.includes(q),
         })),
     ];
@@ -326,8 +332,13 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
                   </thead>
                   <tbody>
                     {arch.slots.map((s) => {
-                      const cands = s.candidates.map((id) => instById.get(id)).filter((i): i is ComponentInstance => !!i);
+                      // instances that fail a component requirement are greyed and listed last (still selectable)
+                      const cands = s.candidates
+                        .map((id) => instById.get(id))
+                        .filter((i): i is ComponentInstance => !!i)
+                        .sort((a, b) => Number(compChecks.failing(a.qualifiedName).length > 0) - Number(compChecks.failing(b.qualifiedName).length > 0));
                       const chosen = draft.assignments[s.name] ? instByQn.get(draft.assignments[s.name]!) : undefined;
+                      const chosenFails = compChecks.failing(chosen?.qualifiedName);
                       return (
                         <tr key={s.name}>
                           <td>
@@ -340,14 +351,32 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
                           <td>
                             <select value={draft.assignments[s.name] || ""} onChange={(e) => setDraft({ ...draft, assignments: { ...draft.assignments, [s.name]: e.target.value || null } })}>
                               <option value="">{cands.length ? "— choose —" : "— no instance fits —"}</option>
-                              {cands.map((i) => (
-                                <option key={i.id} value={i.qualifiedName}>
-                                  {i.name}
-                                  {i.component !== s.type ? ` (${short(i.component)})` : ""}
-                                  {i.doc ? ` — ${i.doc}` : ""}
-                                </option>
-                              ))}
+                              {cands.map((i) => {
+                                const bad = compChecks.failing(i.qualifiedName);
+                                return (
+                                  <option
+                                    key={i.id}
+                                    value={i.qualifiedName}
+                                    className={bad.length ? "noncompliant" : ""}
+                                    title={bad.length ? `Fails ${bad.map((c) => reqLabel(c.requirement)).join(", ")}` : undefined}
+                                  >
+                                    {bad.length ? "✗ " : ""}
+                                    {i.name}
+                                    {i.component !== s.type ? ` (${short(i.component)})` : ""}
+                                    {bad.length ? ` — fails ${bad.map((c) => c.requirement.shortName || c.requirement.name).join(", ")}` : i.doc ? ` — ${i.doc}` : ""}
+                                  </option>
+                                );
+                              })}
                             </select>
+                            {chosenFails.length > 0 && (
+                              <div className="small">
+                                {chosenFails.map((c) => (
+                                  <span key={c.requirement.qualifiedName} className="pill bad" title={c.requirement.doc || undefined}>
+                                    ✗ {reqLabel(c.requirement)}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
                           </td>
                           <td className="mono small muted">
                             {chosen
@@ -464,6 +493,10 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
                         <td>
                           <div className="mono strong">{c.name}</div>
                           {c.doc && <div className="muted small">{c.doc}</div>}
+                          {(() => {
+                            const flies = catalog.missions.filter((m) => m.assignedTo.includes(c.qualifiedName)).map((m) => m.name);
+                            return flies.length ? <div className="small" title="Missions assigned to this system: their requirements apply to it">✈ {flies.join(", ")}</div> : null;
+                          })()}
                         </td>
                         {arch.slots.map((s) => (
                           <td key={s.name} className="mono small">

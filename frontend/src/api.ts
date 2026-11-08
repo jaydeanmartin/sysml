@@ -97,13 +97,16 @@ export const api = {
   evidence: (projectId: string) => call<EvidenceRecord[]>(`${M}/projects/${projectId}/evidence`),
   recordEvidence: (resultId: string, tag: boolean) =>
     call<CatalogChange & { tag: string | null }>(`${M}/results/${resultId}/evidence`, { method: "POST", json: { tag } }),
-  checkRequirements: (projectId: string) => call<RequirementCheck>(`${M}/projects/${projectId}/requirements/check`, { method: "POST" }),
+  checkRequirements: (projectId: string, scope: "all" | "static" = "all") =>
+    call<RequirementCheck>(`${M}/projects/${projectId}/requirements/check?scope=${scope}`, { method: "POST" }),
   simulateSystems: (projectId: string, req: { architecture?: string; systems?: string[]; simulation?: string }) =>
     call<SystemSimulationResult>(`${M}/projects/${projectId}/catalog/configurations/simulate`, { method: "POST", json: req }),
   tuneSystem: (projectId: string, system: string, simulation?: string) =>
     call<TuneResult>(`${M}/projects/${projectId}/catalog/configurations/tune`, { method: "POST", json: { system, simulation } }),
   simulateMission: (projectId: string, req: SimulationRequest) =>
     call<SimulationResult>(`${M}/projects/${projectId}/catalog/missions/simulate`, { method: "POST", json: req }),
+  assignMission: (projectId: string, mission: string, systems: string[]) =>
+    call<CatalogChange>(`${M}/projects/${projectId}/catalog/missions/assignments`, { method: "POST", json: { mission, systems } }),
   evaluateMissions: (projectId: string, missionType: string, draft: StepRequest[] | null) =>
     call<MissionEvaluation>(`${M}/projects/${projectId}/catalog/missions/evaluate`, { method: "POST", json: { missionType, draft } }),
   deleteCatalogElement: (projectId: string, qualifiedName: string) =>

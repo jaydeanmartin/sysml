@@ -289,6 +289,14 @@ def test_system_simulations_and_their_requirements():
             node("B__Climb__command", "attribute", "command", "B__Climb", value='"climbRate"'),
             node("B__Climb__step", "attribute", "step", "B__Climb", value="drone.takeoff.climbRate"),
             node("B__Climb__settlingTime", "param", "settlingTime", "B__Climb", direction="in"),
+            node("B__Climb__settlingLimit", "attribute", "settlingLimit", "B__Climb"),
+            # test instances: the limits set, one also overriding what it flies
+            node("B__Spec", "package", "Spec", "B"),
+            node("B__Spec__climb", "requirement", "climb", "B__Spec", typeId="B__Climb"),
+            node("B__Spec__climb__settlingLimit", "attribute", "settlingLimit", "B__Spec__climb", value="4"),
+            node("B__Spec__stable", "requirement", "stable", "B__Spec", typeId="B__Stable"),
+            node("B__Spec__steep", "requirement", "steep", "B__Spec", typeId="B__Climb"),
+            node("B__Spec__steep__step", "attribute", "step", "B__Spec__steep", value="1.5"),
         ],
         "edges": MISSION_GRAPH["edges"] + [
             {"id": "v1", "kind": "verify", "source": "B__Ctl", "target": "B__Stable"},
@@ -296,11 +304,23 @@ def test_system_simulations_and_their_requirements():
         ],
     }
     cat = catalog.build(graph, {"Lib.sysml": {"id": "lib", "name": "Lib"}})
+    spec = {r["name"]: r for r in cat["specification"]}
+    assert spec["climb"]["appliesTo"] == ["B::Cfg::d1"]
+    # with d1 satisfying another climb test, that one replaces it for d1, flying its own step
+    graph["edges"] = graph["edges"] + [{"id": "s1", "kind": "satisfy", "source": "B__Cfg__d1", "target": "B__Spec__steep"}]
+    steep = {r["name"]: r for r in catalog.build(graph, {"Lib.sysml": {"id": "lib", "name": "Lib"}})["specification"]}
+    assert steep["climb"]["appliesTo"] == [] and steep["steep"]["appliesTo"] == ["B::Cfg::d1"]
+    assert steep["steep"]["flies"] == {"command": '"climbRate"', "step": "1.5"}
     sims = {s["name"]: s for s in cat["simulations"]}
     # a control test: its attributes say what to fly
     climb = next(r for r in cat["requirements"] if r["name"] == "Climb")
     assert climb["isTest"] and climb["attributes"] == {"command": '"climbRate"', "step": "drone.takeoff.climbRate"}
     assert not next(r for r in cat["requirements"] if r["name"] == "Stable")["isTest"]
+    # a test instance flies what its type gives a value; the open attributes are its limits
+    spec = {r["name"]: r for r in cat["specification"]}
+    assert spec["climb"]["isTest"] and spec["climb"]["flies"] == {"command": '"climbRate"', "step": "drone.takeoff.climbRate"}
+    assert spec["climb"]["measured"] == ["settlingTime"]
+    assert not spec["stable"]["isTest"] and spec["stable"]["flies"] == {}
     assert (sims["Ctl"]["scope"], sims["Ctl"]["kind"]) == ("system", "verification def")
     assert (sims["Tune"]["scope"], sims["Tune"]["kind"]) == ("system", "analysis def")
     [arch] = cat["architectures"]
@@ -344,6 +364,49 @@ def test_specification_hierarchy_parameters_and_applicability():
     params = {p["name"]: (p["value"], p["bound"]) for p in light["parameters"]}
     assert params == {"limit": ("1500 [SI::kg]", True), "margin": ("0", False)}
     # applicability: every system the subject type fits, or what satisfy names
-    assert light["level"] == "system" and light["appliesTo"] == ["A::base"] and not light["explicit"]
+    # ... except that an instance a system satisfies replaces, for it, those of the same type
+    assert light["level"] == "system" and light["appliesTo"] == [] and not light["explicit"]
+    assert light["replacedFor"] == {"A::base": "R::Spec::top::lighter"}
     assert lighter["explicit"] and lighter["appliesTo"] == ["A::base"]
     assert gears["level"] == "component" and gears["appliesTo"] == ["L::Cat::m6"]  # a Manual is a Gearbox
+
+
+def test_missions_as_use_cases_with_objective_requirements_and_assignments():
+    nodes = MISSION_GRAPH["nodes"] + [
+        node("B__Time", "requirement def", "Time", "B", isAbstract=True),
+        node("B__Time__drone", "subject", "drone", "B__Time", typeId="B__Drone"),
+        node("B__Time__limit", "attribute", "limit", "B__Time"),
+        node("B__Time__duration", "param", "duration", "B__Time", direction="in"),
+        # a use-case mission type: the drone as subject, requirements in its objective
+        node("B__Run", "use case def", "Run", "B", metadata=["Mission"]),
+        node("B__Run__duration", "attribute", "duration", "B__Run", typeName="Real"),
+        node("B__Run__goals", "requirement", "goals", "B__Run"),
+        node("B__Run__goals__onTime", "requirement", "onTime", "B__Run__goals", typeId="B__Time", shortName="MIS-1"),
+        node("B__Run__goals__onTime__limit", "attribute", "limit", "B__Run__goals__onTime", value="1800"),
+        # a mission adding a requirement of its own in its (redefined) objective
+        node("B__Ms__far", "use case", "far", "B__Ms", typeId="B__Run", typeName="Run"),
+        node("B__Ms__far__goals", "requirement", "goals", "B__Ms__far", redefines="B__Run__goals"),
+        node("B__Ms__far__goals__window", "requirement", "window", "B__Ms__far__goals", typeId="B__Time", shortName="MIS-F1"),
+        node("B__Ms__far__fly", "action", "fly", "B__Ms__far", typeId="B__Fly", typeName="Fly"),
+    ]
+    edges = MISSION_GRAPH["edges"] + [{"id": "a1", "kind": "allocation", "source": "B__Ms__far", "target": "B__Cfg__d1", "loc": None}]
+    cat = catalog.build({"nodes": nodes, "edges": edges}, {"Lib.sysml": {"id": "lib", "name": "Lib"}})
+    run = next(t for t in cat["missionTypes"] if t["name"] == "Run")
+    assert run["kind"] == "use case def" and run["requirements"] == ["B::Run::goals::onTime"]
+    far = next(m for m in cat["missions"] if m["name"] == "far")
+    assert far["missionType"] == "B::Run" and [s["name"] for s in far["steps"]] == ["fly"]
+    assert far["requirements"] == ["B::Ms::far::goals::window"] and far["assignedTo"] == ["B::Cfg::d1"]
+    reqs = {r["name"]: r for r in cat["missionRequirements"]}
+    assert reqs["onTime"]["owner"] == "B::Run" and reqs["onTime"]["measured"] == ["duration"]
+    assert {p["name"]: p["value"] for p in reqs["onTime"]["parameters"]} == {"limit": "1800"}
+    assert reqs["window"]["owner"] == "B::Ms::far" and reqs["window"]["architectures"] == ["B::Drone"]
+    assert cat["assignments"] == [{"mission": "B::Ms::far", "system": "B::Cfg::d1", "loc": None}]
+    # objective requirements are not part of the specification
+    assert not any(r["name"] in ("onTime", "window", "goals") for r in cat["specification"])
+
+
+def test_use_case_mission_text_keeps_its_objective():
+    obj = ["objective :>> goals {", "    requirement window : Time { attribute :>> limit = 1500; }", "}"]
+    text = catalog.mission_text("far", "Run", [("fly", "Fly", {"distance": "2000"})], "8 km", "use case", obj)
+    assert text[0] == "use case far : Run {" and text[1] == "    doc /* 8 km */"
+    assert text[2:5] == ["    " + l for l in obj] and text[5] == "    first start;"

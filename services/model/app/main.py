@@ -923,8 +923,14 @@ def save_mission(project_id: uuid.UUID, body: MissionIn) -> dict[str, Any]:
     model_id, pkg_qn, apply = _place(cat, sources, body.name, package, replace)
     names = catalog.step_names([s.behavior for s in body.steps])
     steps = [(n, catalog.ref(s.behavior, pkg_qn), s.values) for n, s in zip(names, body.steps)]
+    # a rewrite keeps the mission's objective (its own requirements) as written
+    objective: list[str] = []
+    if replace and replace.get("objectiveLoc"):
+        text = catalog._slice(sources[replace["modelId"]], replace["objectiveLoc"])
+        indent = " " * (replace["objectiveLoc"]["column"] - 1)
+        objective = [l[len(indent):] if l.startswith(indent) else l.lstrip() for l in text.splitlines()]
     try:
-        block = catalog.mission_text(body.name, catalog.ref(mtype["qualifiedName"], pkg_qn), steps, body.doc)
+        block = catalog.mission_text(body.name, catalog.ref(mtype["qualifiedName"], pkg_qn), steps, body.doc, _mission_keyword(mtype), objective)
         source = apply(block)
     except catalog.CatalogError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -932,6 +938,49 @@ def save_mission(project_id: uuid.UUID, body: MissionIn) -> dict[str, Any]:
     return _commit(model_id, source, f"{verb} mission {body.name} : {mtype['name']}") | {
         "qualifiedName": f"{pkg_qn}::{body.name}", "text": "\n".join(block),
     }
+
+
+def _mission_keyword(mtype: dict[str, Any]) -> str:
+    """Missions of a use case def are use cases; of an action def, actions."""
+    return "use case" if mtype.get("kind") == "use case def" else "action"
+
+
+class AssignIn(BaseModel):
+    mission: str = Field(description="qualified name of the mission")
+    systems: list[str] = Field(description="the system instances that fly it (all of them: the others are unassigned)")
+
+
+@app.post("/projects/{project_id}/catalog/missions/assignments")
+def assign_mission(project_id: uuid.UUID, body: AssignIn) -> dict[str, Any]:
+    """Set the system instances a mission is assigned to: allocations of the
+    mission to each, in the Assignments package of the mission's model (created
+    if needed). The mission's requirements then apply to those drones."""
+    cat, sources = _project_catalog(project_id)
+    mission = _find(cat["missions"], body.mission, "mission")
+    cfgs = {c["qualifiedName"]: c for c in cat["configurations"]}
+    for q in body.systems:
+        if q not in cfgs:
+            raise HTTPException(404, f"system instance '{q}' not found")
+    pairs = [(a["mission"], a["system"]) for a in cat["assignments"] if a["mission"] != mission["qualifiedName"]]
+    pairs += [(mission["qualifiedName"], q) for q in body.systems]
+    model_id = mission["modelId"]
+    root = mission["qualifiedName"].split("::")[0]
+    pkg = next((p for p in cat["packages"] if p["modelId"] == model_id and p["qualifiedName"].rsplit("::", 1)[-1] == "Assignments"), None)
+    lines = [f"allocate {m} to {s};" for m, s in pairs if cat_model_of(cat, m) == model_id]
+    block = ["package Assignments {", *catalog._body(lines), "}"]
+    try:
+        if pkg:
+            source = catalog.replace_element(sources[model_id], pkg["loc"], block)
+        else:
+            source = catalog.insert_member(sources[model_id], _package(cat, root)["loc"], block)
+    except catalog.CatalogError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    names = ", ".join(short_name(q) for q in body.systems) or "nobody"
+    return _commit(model_id, source, f"Assign {mission['name']} to {names}") | {"qualifiedName": f"{root}::Assignments"}
+
+
+def cat_model_of(cat: dict[str, Any], mission_qn: str) -> str | None:
+    return next((m["modelId"] for m in cat["missions"] if m["qualifiedName"] == mission_qn), None)
 
 
 def _quantities(behavior: dict[str, Any]) -> list[str]:
@@ -994,7 +1043,7 @@ class _Flights:
             _check_steps(cat, draft)
             names = catalog.step_names([s.behavior for s in draft])
             draft_steps = [(n, s.behavior, s.values) for n, s in zip(names, draft)]
-            self.lines += [f"    {l}" for l in catalog.mission_text("draft", mtype["qualifiedName"], draft_steps)]
+            self.lines += [f"    {l}" for l in catalog.mission_text("draft", mtype["qualifiedName"], draft_steps, keyword=_mission_keyword(mtype))]
             missions["draft"] = (f"{self.SCRATCH}::draft", [{"name": n, "behavior": b} for n, b, _ in draft_steps])
         self.archs = {a["id"]: a for a in cat["architectures"]}
         self.flights: dict[str, dict[str, dict[str, Any]]] = {}
@@ -1060,21 +1109,31 @@ def _invoke_tool(sim: dict[str, Any], sent: dict[str, Any], run_id: str) -> dict
     }
 
 
-def _mission_checks(cat: dict[str, Any], arch: dict[str, Any], totals: list[str]) -> list[dict[str, Any]]:
-    """How each mission requirement of an architecture is checked: by the mission
-    simulation that verifies it, when one applies to the architecture and its
-    out parameters supply every parameter of the requirement; else by the
-    mission totals, when its parameters are all totals; else not at all."""
-    reqs = {r["qualifiedName"]: r for r in cat["requirements"]}
+def _mission_requirements(cat: dict[str, Any], mtype: dict[str, Any], mission: str | None) -> list[dict[str, Any]]:
+    """The requirement instances a mission puts on the drone flying it: those in
+    its type's objective, and those in its own (none for a draft)."""
+    own = next((m["requirements"] for m in cat["missions"] if m["qualifiedName"] == mission), []) if mission else []
+    wanted = set(mtype.get("requirements") or []) | set(own)
+    return [r for r in cat["missionRequirements"] if r["qualifiedName"] in wanted]
+
+
+def _mission_checks(cat: dict[str, Any], arch: dict[str, Any], totals: list[str], mtype: dict[str, Any], mission: str | None) -> list[dict[str, Any]]:
+    """How each requirement of the mission (see ``_mission_requirements``) is
+    checked for a drone of ``arch``: by the mission simulation that verifies its
+    type, when one applies to the architecture and its out parameters supply
+    every measured value; else by the mission totals, when the measured values
+    are all totals; else not at all. Its parameters are the instance's own."""
     sims = {s["qualifiedName"]: s for s in cat["simulations"]}
     out = []
-    for rq in arch["missionRequirements"]:
-        params = reqs[rq]["params"]
-        sim = next((q for q in arch["simulations"] if rq in sims[q]["verifies"] and set(params) <= set(sims[q]["outputs"])), None)
+    for r in _mission_requirements(cat, mtype, mission):
+        if arch["qualifiedName"] not in r["architectures"]:
+            continue
+        params = r["measured"]
+        sim = next((q for q in arch["simulations"] if r["type"] in sims[q]["verifies"] and set(params) <= set(sims[q]["outputs"])), None)
         if sim:
-            out.append({"requirement": rq, "params": params, "method": "simulation", "by": sim})
-        elif set(params) <= set(totals):
-            out.append({"requirement": rq, "params": params, "method": "evaluation", "by": None})
+            out.append({"requirement": r["qualifiedName"], "params": params, "method": "simulation", "by": sim})
+        elif params and set(params) <= set(totals):
+            out.append({"requirement": r["qualifiedName"], "params": params, "method": "evaluation", "by": None})
     return out
 
 
@@ -1085,6 +1144,7 @@ def _literal(x: float) -> str:
 def _run_missions(
     project_id: uuid.UUID, cat: dict[str, Any], mtype: dict[str, Any], draft: list[StepIn] | None,
     only: str | None = None, systems: list[str] | None = None, simulate: str | bool = False,
+    pairs: set[tuple[str, str]] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str], str]:
     """Fly missions with every system instance and check the mission requirements.
 
@@ -1112,10 +1172,10 @@ def _run_missions(
     for key, per_cfg in fl.flights.items():
         out[key] = {}
         for cfg_qn, f in per_cfg.items():
-            if systems is not None and cfg_qn not in systems:
+            if (systems is not None and cfg_qn not in systems) or (pairs is not None and (key, cfg_qn) not in pairs):
                 continue
             arch = fl.archs[cfgs[cfg_qn]["architectureId"]]
-            checks = _mission_checks(cat, arch, totals)
+            checks = _mission_checks(cat, arch, totals, mtype, None if key == "draft" else key)
             res: dict[str, Any] = {
                 "problems": f["problems"], "steps": [], "totals": {}, "verdicts": {},
                 "verification": {c["requirement"]: {"method": c["method"], "by": c["by"]} for c in checks},
@@ -1581,6 +1641,12 @@ def _behavior_inputs(cat: dict[str, Any], cfg: dict[str, Any]) -> list[dict[str,
     return out
 
 
+def _system_instances(cat: dict[str, Any], cfg_qn: str, types: set[str]) -> list[dict[str, Any]]:
+    """The specification's requirement instances of these types that apply to a
+    system instance and take measured values."""
+    return [r for r in cat["specification"] if r["type"] in types and r["measured"] and cfg_qn in r["appliesTo"]]
+
+
 def _run_system(
     project_id: uuid.UUID, cat: dict[str, Any], plans_in: list[tuple[str, str]],
 ) -> tuple[dict[str, dict[str, Any]], list[str], str]:
@@ -1592,7 +1658,6 @@ def _run_system(
     Returns ``(results[system][simulation], errors, run id)``."""
     sims = {x["qualifiedName"]: x for x in cat["simulations"]}
     cfgs = {c["qualifiedName"]: c for c in cat["configurations"]}
-    reqs = {r["qualifiedName"]: r for r in cat["requirements"]}
     archs = {a["id"]: a for a in cat["architectures"]}
 
     def bind(expr: str, subject: str, cfg_qn: str) -> str:
@@ -1604,10 +1669,12 @@ def _run_system(
         sim = sims[sim_q]
         inputs = {i["name"]: bind(i["value"], sim["subject"], cfg_qn) for i in sim["inputs"]}
         exprs += list(inputs.values())
-        # the control tests of the system's architecture: each attribute bound to the system
+        # the control test instances that apply to the system, of a type one of its system
+        # simulations verifies: what each flies, bound to the system (a tuning flies them too)
+        verified = {q for s in archs[cfgs[cfg_qn]["architectureId"]]["systemSimulations"] for q in sims[s]["verifies"]}
         tests = {
-            rq: {k: bind(v, reqs[rq]["subject"], cfg_qn) for k, v in reqs[rq]["attributes"].items()}
-            for rq in archs[cfgs[cfg_qn]["architectureId"]]["systemRequirements"] if reqs[rq]["isTest"]
+            r["qualifiedName"]: {k: bind(v, r["subject"], cfg_qn) for k, v in r["flies"].items()}
+            for r in _system_instances(cat, cfg_qn, verified) if r["isTest"]
         }
         exprs += [e for t in tests.values() for e in t.values()]
         plans[(cfg_qn, sim_q)] = {"sim": sim, "inputs": inputs, "tests": tests}
@@ -1648,15 +1715,15 @@ def _run_system(
             res["verdicts"], res["verification"] = {}, {}
             out.setdefault(cfg_qn, {})[sim_q] = res
 
-    # the requirements each simulation verifies, with its results
+    # the requirement instances that apply to the system, of a type each simulation
+    # verifies, checked with its results
     pending: list[tuple[dict[str, Any], str, str]] = []
     for cfg_qn, per_sim in out.items():
         for sim_q, res in per_sim.items():
             sim = sims[sim_q]
             o = res.get("outputs") or {}
-            for rq in sim["verifies"]:
-                params = reqs[rq]["params"] if rq in reqs else []
-                is_test = rq in reqs and reqs[rq]["isTest"]
+            for r in _system_instances(cat, cfg_qn, set(sim["verifies"])):
+                rq, params, is_test = r["qualifiedName"], r["measured"], r["isTest"]
                 # a control test is checked with its own results, the others with the simulation's outputs
                 if not params or (not is_test and not set(params) <= set(sim["outputs"])):
                     continue
@@ -1785,14 +1852,32 @@ def tune_system(project_id: uuid.UUID, body: TuneIn) -> dict[str, Any]:
 
 
 # ------------------------------------------------------------------ the specification
+RANK = {"fails": 3, "error": 2, "unverified": 1, "holds": 0}
+
+
+def rank_of(v: str | None) -> int:
+    return RANK.get(v or "", -1)
+
+
 @app.post("/projects/{project_id}/requirements/check")
-def check_requirements(project_id: uuid.UUID) -> dict[str, Any]:
+def check_requirements(
+    project_id: uuid.UUID,
+    scope: str = Query("all", pattern="^(all|static)$", description="static: only what evaluation alone checks, no simulations"),
+) -> dict[str, Any]:
     """Check the specification. Every requirement instance whose type needs no
     measured values is evaluated as ``Instance(subject)`` for each system or
     component instance it applies to, in one evaluate run. Instances that need
-    measured values are left to the simulations that verify them. Statements
+    measured values are checked with the results of the system simulations that
+    verify their types (``systemDetail``: simulation, result and values per
+    requirement and system), or left unverified. Statements
     are rolled up: for a subject, a statement holds when every instance under it
     that applies does, fails when one fails.
+    Mission requirements are checked for the drones their missions are assigned
+    to, by flying those missions (``missionVerdicts``: the worst over a drone's
+    missions; ``missionDetail``: per mission).
+    With ``scope=static`` nothing is simulated: instances that need measured
+    values stay unverified and mission requirements are left out (fast, for
+    flagging components and candidates).
     Returns ``verdicts`` and ``rollup``, both requirement -> subject -> verdict."""
     cat, _ = _project_catalog(project_id)
     spec = cat["specification"]
@@ -1806,14 +1891,38 @@ def check_requirements(project_id: uuid.UUID) -> dict[str, Any]:
     for (rq, subj), e in exprs.items():
         v = got.get(e)
         verdicts.setdefault(rq, {})[subj] = "holds" if v == "true" else "fails" if v == "false" else "error"
+    # instances that take measured values: checked with the results of the system
+    # simulations that verify their types (stored results are reused); the others stay unverified
     for r in spec:
-        if r["type"] and r["measured"]:  # a simulation verifies it (missions, control)
+        if r["type"] and r["measured"]:
             verdicts[r["qualifiedName"]] = {subj: "unverified" for subj in r["appliesTo"]}
+    sims = {x["qualifiedName"]: x for x in cat["simulations"]}
+    archs = {a["id"]: a for a in cat["architectures"]}
+    plans = [
+        (c["qualifiedName"], q)
+        for c in cat["configurations"]
+        for q in archs[c["architectureId"]]["systemSimulations"]
+        if sims[q]["kind"] == "verification def" and _system_instances(cat, c["qualifiedName"], set(sims[q]["verifies"]))
+    ]
+    system_detail: dict[str, dict[str, dict[str, Any]]] = {}
+    if plans and scope == "all":
+        out, errs, _ = _run_system(project_id, cat, plans)
+        errors += errs
+        for cfg_qn, per_sim in out.items():
+            for sim_q, res in per_sim.items():
+                for rq, ver in res["verification"].items():
+                    v = res["verdicts"].get(rq, "error")
+                    cur = verdicts.setdefault(rq, {}).get(cfg_qn)
+                    if cur in (None, "unverified") or rank_of(v) > rank_of(cur):
+                        verdicts[rq][cfg_qn] = v
+                    system_detail.setdefault(rq, {})[cfg_qn] = {
+                        "simulation": sim_q, "resultId": res.get("resultId"), "values": ver.get("values"), "note": ver.get("note") or res.get("error"),
+                    }
     children: dict[str, list[str]] = {}
     for r in spec:
         if r["parent"]:
             children.setdefault(r["parent"], []).append(r["qualifiedName"])
-    rank = {"fails": 3, "error": 2, "unverified": 1, "holds": 0}
+    rank = RANK
     rollup: dict[str, dict[str, str]] = {}
 
     def roll(q: str) -> dict[str, str]:
@@ -1829,7 +1938,34 @@ def check_requirements(project_id: uuid.UUID) -> dict[str, Any]:
 
     for r in spec:
         roll(r["qualifiedName"])
-    return {"verdicts": verdicts, "rollup": rollup, "errors": errors}
+
+    # mission requirements: for the drones each mission is assigned to, the worst
+    # verdict over the drone's missions (each kept in mission detail)
+    mission_verdicts: dict[str, dict[str, str]] = {}
+    mission_detail: dict[str, dict[str, dict[str, str]]] = {}
+    missions_of = {m["qualifiedName"]: m["missionType"] for m in cat["missions"]}
+    for mtype in cat["missionTypes"]:
+        pairs = {(a["mission"], a["system"]) for a in cat["assignments"] if missions_of.get(a["mission"]) == mtype["qualifiedName"]}
+        if not pairs or scope == "static":
+            continue
+        out, errs, _ = _run_missions(project_id, cat, mtype, None, pairs=pairs)
+        errors += errs
+        for mission, per in out.items():
+            for cfg, res in per.items():
+                for r in _mission_requirements(cat, mtype, mission):
+                    q = r["qualifiedName"]
+                    if res["problems"]:
+                        v = "fails"  # the drone cannot fly a mission it is assigned
+                    else:
+                        v = res["verdicts"].get(q) or ("unverified" if q not in res["verification"] else "error")
+                    mission_detail.setdefault(q, {}).setdefault(cfg, {})[mission] = v
+                    cur = mission_verdicts.setdefault(q, {}).get(cfg)
+                    if cur is None or rank[v] > rank[cur]:
+                        mission_verdicts[q][cfg] = v
+    return {
+        "verdicts": verdicts, "rollup": rollup, "systemDetail": system_detail,
+        "missionVerdicts": mission_verdicts, "missionDetail": mission_detail, "errors": errors,
+    }
 
 
 @app.delete("/projects/{project_id}/catalog/elements")

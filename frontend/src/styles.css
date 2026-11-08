@@ -499,6 +499,11 @@ label.inline input { width: auto; }
 .lib-item.sub { padding-left: 22px; font-size: 12px; }
 .lib-item .em { font-style: italic; }
 .lib-item .count { margin-left: auto; font-size: 11px; color: var(--muted); }
+.lib-item .count { display: inline-flex; align-items: center; gap: 4px; }
+.fail-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--bad); }
+ul.plain { list-style: none; margin: 0 0 8px; padding: 0; }
+ul.plain li { padding: 2px 0; }
+option.noncompliant { color: var(--muted); }
 .lib-item .dot { margin-left: auto; }
 .lib-detail { min-width: 0; display: flex; flex-direction: column; gap: 10px; }
 .detail-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
@@ -625,3 +630,12 @@ td.nowrap { white-space: nowrap; }
 .spec-table .spec-doc { max-width: 420px; white-space: normal; }
 .spec-toggle { padding: 0 4px 0 0; font-size: 11px; }
 .pill.spec-explicit { margin-left: 6px; font-size: 10.5px; padding: 0 6px; }
+
+/* ------------------------------------------------------------ mission assignments */
+.assign-row { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; }
+.chip-toggle { font-size: 11.5px; padding: 1px 9px; border-radius: 99px; }
+.chip-toggle.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.table td.assigned-cell { box-shadow: inset 3px 0 0 var(--accent); }
+.assigned-mark { color: var(--accent); font-weight: 600; }
+.table tr.assigned-row td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+.spec-table tr.spec-section td { background: var(--neutral-soft); font-size: 11px; font-weight: 700; color: var(--muted); text-transform: uppercase; letter-spacing: .04em; }

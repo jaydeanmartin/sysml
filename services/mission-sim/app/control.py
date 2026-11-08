@@ -721,6 +721,7 @@ def fly_test(pl: Plant, g: Gains, test: dict[str, Any], dt: float) -> dict[str, 
             return {"heading": angle}
 
         rec = _fly(pl, g, dt, t_end + hold, ref_turn)
+        rec["heading"] = np.degrees(np.unwrap(np.radians(rec["heading"])))  # continuous through ±180°
         ref = np.where(rec["t"] < t0, 0.0, np.where(rec["t"] < t_end, sign * math.degrees(rate or 0) * (rec["t"] - t0), step))
         after = rec["t"] >= t_end
         err = rec["heading"][after] - step

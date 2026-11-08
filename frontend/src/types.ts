@@ -308,6 +308,8 @@ export interface CatalogRequirement extends Located {
   isTest?: boolean;
   /** attribute -> value expression */
   attributes?: Record<string, string>;
+  /** the simulations whose objectives verify it */
+  verifiedBy?: string[];
 }
 
 /** a #Mission action def; each attribute is a total over the steps */
@@ -315,6 +317,10 @@ export interface MissionType extends Located {
   isAbstract: boolean;
   specializes: string[];
   totals: CatalogAttribute[];
+  /** use case def (missions are use cases) or action def */
+  kind?: string;
+  /** requirement instances in its objective: they apply to every drone a mission of it is assigned to */
+  requirements: string[];
 }
 
 export interface MissionStep {
@@ -329,6 +335,18 @@ export interface Mission extends Located {
   missionTypeId: string;
   missionType: string;
   steps: MissionStep[];
+  /** its own requirement instances (in its objective), besides its type's */
+  requirements: string[];
+  /** system instances it is assigned to (allocations) */
+  assignedTo: string[];
+}
+
+/** a requirement instance in the objective of a mission type or a mission */
+export interface MissionRequirement extends SpecRequirement {
+  /** the mission type or mission whose objective holds it */
+  owner: string;
+  /** architectures its subject type fits */
+  architectures: string[];
 }
 
 /** a mission as one system instance flies it */
@@ -387,6 +405,10 @@ export interface Catalog {
   simulations: MissionSimulationDef[];
   /** the requirement hierarchy: statements and instances, in document order */
   specification: SpecRequirement[];
+  /** requirement instances in the objectives of mission types and missions */
+  missionRequirements: MissionRequirement[];
+  /** missions allocated to system instances */
+  assignments: { mission: string; system: string }[];
   packages: { qualifiedName: string; modelId: string | null; modelName: string | null; loc: Loc | null }[];
   tags: Record<string, string>;
   diagnostics: Diagnostic[];
@@ -765,6 +787,12 @@ export interface SpecRequirement extends Located {
   appliesTo: string[];
   /** true: named by satisfy relations; false: every instance its subject type fits */
   explicit: boolean;
+  /** subject -> the instance of the same type it satisfies, which replaces this one for it */
+  replacedFor?: Record<string, string>;
+  /** a control test (#ControlTest type) */
+  isTest: boolean;
+  /** what a control test flies: its type's valued attributes, as this instance sets them */
+  flies: Record<string, string>;
 }
 
 export type SpecVerdict = "holds" | "fails" | "error" | "unverified";
@@ -774,5 +802,11 @@ export interface RequirementCheck {
   verdicts: Record<string, Record<string, SpecVerdict>>;
   /** the same for every requirement, statements rolled up from what is under them */
   rollup: Record<string, Record<string, SpecVerdict>>;
+  /** requirement -> system -> how a system simulation verified it */
+  systemDetail: Record<string, Record<string, { simulation: string; resultId?: string | null; values?: Record<string, number> | null; note?: string | null }>>;
+  /** mission requirement -> drone -> the worst verdict over the drone's assigned missions */
+  missionVerdicts: Record<string, Record<string, SpecVerdict>>;
+  /** mission requirement -> drone -> mission -> verdict */
+  missionDetail: Record<string, Record<string, Record<string, SpecVerdict>>>;
   errors: string[];
 }

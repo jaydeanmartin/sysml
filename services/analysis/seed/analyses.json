@@ -334,6 +334,7 @@
   {
     "name": "controlSimulator",
     "kind": "external",
+    "version": "2",
     "description": "Controllability of a multirotor (mission simulator service): 6-DOF rigid body with rotor and motor dynamics and reaction torques, a command mixer and cascaded PID loops down to each ESC. mode=tune identifies the dynamics from open-loop tests and proposes gains; mode=verify uses the given gains (rpmKp ... positionKp, rpmLoop). Both fly the control tests given (climb-rate, speed or heading steps, gusts) and report each one's results under testResults[requirement].",
     "endpointUrl": "http://mission-sim:8011/control",
     "inputs": [

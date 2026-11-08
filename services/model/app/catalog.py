@@ -50,16 +50,20 @@ Nothing here is stored outside the models. The conventions are plain SysML v2:
   of flown steps (Configurator). A requirement def with ``in`` parameters that
   a system simulation verifies is a *system requirement*, the others mission
   requirements;
-* a requirement def tagged ``#ControlTest`` is a **control test**: its
-  attributes (``command``, ``step``, ``rate``, ``hold``) say what a system
-  simulation flies, its ``in`` parameters which of the test's results it is
-  checked with;
+* a requirement def tagged ``#ControlTest`` is a **control test** type: the
+  attributes it gives a value (``command``, ``step``, ``rate``, ``hold``) say
+  what a system simulation flies, those it leaves open are limits its
+  instances set, its ``in`` parameters which of the test's results it is
+  checked with. The simulation flies the test *instances* in the
+  specification that apply to the system;
 * the **specification** is the hierarchy of requirement usages in packages:
   *statements* (no type, no constraint) hold more statements or *instances*
   (a requirement def, usually abstract, with its parameters, the attributes,
   set). An instance applies to the elements its ``satisfy`` relations name;
   with none, to every system instance (or component instance) its subject type
-  fits. A statement holds when every instance under it that applies does;
+  fits, except those that satisfy another instance of the same type (which
+  replaces it for them: per-system limits). A statement holds when every
+  instance under it that applies does;
 * **simulation evidence** is a verification usage typed by a mission
   simulation and tagged ``#SimulationEvidence`` (metadata): its subject is the
   system instance, its metadata attributes point at a stored result (see
@@ -196,7 +200,8 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
     component_ids = {n["id"] for n in part_defs if idx.tagged(n["id"], COMPONENT_TAG)}
     arch_ids = {n["id"] for n in part_defs if idx.tagged(n["id"], ARCHITECTURE_TAG)} - component_ids
     behavior_ids = {n["id"] for n in action_defs if idx.tagged(n["id"], BEHAVIOR_TAG)}
-    mission_ids = {n["id"] for n in action_defs if idx.tagged(n["id"], MISSION_TAG)} - behavior_ids
+    use_case_defs = [n for n in graph["nodes"] if n["kind"] == "use case def"]
+    mission_ids = {n["id"] for n in action_defs + use_case_defs if idx.tagged(n["id"], MISSION_TAG)} - behavior_ids
     # components and behaviors share the library: instances of either are usages in a package
     library_ids = component_ids | behavior_ids
 
@@ -307,10 +312,8 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
         return bool(owner and owner["kind"] == "package")
 
     arch_lineages = [idx.ancestors(a) for a in arch_ids]
-    specification = []
-    for n in graph["nodes"]:
-        if n["kind"] != "requirement" or not in_spec(n):
-            continue
+    def req_entry(n: dict[str, Any]) -> dict[str, Any]:
+        """A requirement usage: a statement, or an instance of a requirement type with its parameters."""
         owner = idx.nodes.get(n.get("owner") or "")
         tdef = req_by_id.get(n.get("typeId") or "")
         own_attrs = {c["name"]: c["value"] for c in idx.children.get(n["id"], []) if c["kind"] == "attribute" and c.get("value")}
@@ -321,7 +324,7 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
             level = "component"
         else:
             level = "statement" if not tdef else "other"
-        specification.append(
+        return (
             {
                 **located(n),
                 "shortName": n.get("shortName"),
@@ -340,10 +343,19 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
                 ],
                 # measured values a verification supplies (an in parameter of the type)
                 "measured": tdef["params"] if tdef else [],
+                # a control test: what the simulation flies, the attributes its type gives a
+                # value (the instance may override them); those left open are its limits
+                "isTest": bool(tdef and tdef["isTest"]),
+                "flies": {
+                    a["name"]: own_attrs.get(a["name"], a["value"])
+                    for a, _ in (idx.features(tdef["id"], ("attribute",)) if tdef and tdef["isTest"] else []) if a.get("value")
+                },
                 "constraints": (idx.nodes[tdef["id"]].get("constraints") or []) if tdef else (n.get("constraints") or []),
                 "satisfiedBy": satisfied.get(n["id"], []),
             }
         )
+
+    specification = [req_entry(n) for n in graph["nodes"] if n["kind"] == "requirement" and in_spec(n)]
 
     # ---------------------------------------------------------- simulation evidence
     sim_ids = {s["id"] for s in simulations}
@@ -461,21 +473,38 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
         )
 
     # ---------------------------------------------------------- mission types and missions
+    def objective_requirements(owner_id: str) -> tuple[list[dict[str, Any]], dict[str, Any] | None]:
+        """The requirement instances in the objective of a mission type or a mission, and the objective."""
+        objective = next((c for c in idx.children.get(owner_id, []) if c["kind"] == "requirement" and not c.get("typeId")), None)
+        if not objective:
+            return [], None
+        return [req_entry(c) for c in idx.children.get(objective["id"], []) if c["kind"] == "requirement" and c.get("typeId")], objective
+
+    mission_requirements: list[dict[str, Any]] = []
     mission_types = []
-    for n in action_defs:
+    for n in action_defs + use_case_defs:
         if n["id"] not in mission_ids:
             continue
+        reqs, _ = objective_requirements(n["id"])
+        for r in reqs:
+            r["owner"] = _qn(n)
+        mission_requirements += reqs
         mission_types.append(
             {
                 **located(n),
+                "kind": n["kind"],
                 "isAbstract": n.get("isAbstract", False),
                 "specializes": [_qn(idx.nodes[g]) for g in idx.generals.get(n["id"], [])],
                 "totals": [_attr(a, o, idx) for a, o in idx.features(n["id"], ("attribute",))],
+                # the requirements every mission of this type puts on the drone flying it
+                "requirements": [r["qualifiedName"] for r in reqs],
             }
         )
+    # assignments: allocations of a mission to a system instance
+    allocated: dict[str, list[dict[str, Any]]] = {}
     missions = []
     for n in graph["nodes"]:
-        if n["kind"] != "action" or n.get("typeId") not in mission_ids or not idx.in_package(n):
+        if n["kind"] not in ("action", "use case") or n.get("typeId") not in mission_ids or not idx.in_package(n):
             continue
         steps = []
         for c in idx.children.get(n["id"], []):  # document order is the order of the steps
@@ -484,7 +513,27 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
             behavior = idx.nodes.get(c.get("typeId") or "")
             values = {a["name"]: a["value"] for a in idx.children.get(c["id"], []) if a["kind"] == "attribute" and a.get("value")}
             steps.append({"name": c["name"], "behavior": _qn(behavior) if c.get("typeId") in behavior_ids else None, "values": values})
-        missions.append({**located(n), "missionTypeId": n["typeId"], "missionType": _qn(idx.nodes[n["typeId"]]), "steps": steps})
+        own, objective = objective_requirements(n["id"])
+        for r in own:
+            r["owner"] = _qn(n)
+        mission_requirements += own
+        missions.append({
+            **located(n), "missionTypeId": n["typeId"], "missionType": _qn(idx.nodes[n["typeId"]]), "steps": steps,
+            # its own requirements, besides its type's; the objective is kept when the mission is rewritten
+            "requirements": [r["qualifiedName"] for r in own],
+            "objectiveLoc": objective.get("loc") if objective else None,
+        })
+    mission_by_id = {m["id"]: m for m in missions}
+    cfg_by_id = {c["id"]: c for c in configurations}
+    assignments = []
+    for e in graph["edges"]:
+        if e["kind"] == "allocation" and e["source"] in mission_by_id and e["target"] in cfg_by_id:
+            assignments.append({"mission": mission_by_id[e["source"]]["qualifiedName"], "system": cfg_by_id[e["target"]]["qualifiedName"], "loc": e.get("loc")})
+    for m in missions:
+        m["assignedTo"] = [a["system"] for a in assignments if a["mission"] == m["qualifiedName"]]
+    # where a mission requirement can apply: the architectures its subject type fits
+    for r in mission_requirements:
+        r["architectures"] = [a["qualifiedName"] for a in architectures if r["subjectTypeId"] in idx.ancestors(a["id"])]
 
     # applicability: what each instance's satisfy relations name, else every system
     # (component) instance its subject type fits
@@ -499,6 +548,17 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
             r["explicit"] = False
         else:
             r["appliesTo"], r["explicit"] = [], False
+    # per-subject limits: an instance satisfied by a subject replaces, for that
+    # subject, the instances of the same type that apply to it by subject type
+    for r in specification:
+        if r["explicit"] or not r["typeId"]:
+            continue
+        replaced = {
+            subj: o["qualifiedName"] for o in specification
+            if o["explicit"] and o["typeId"] == r["typeId"] for subj in o["appliesTo"]
+        }
+        r["replacedFor"] = {subj: replaced[subj] for subj in r["appliesTo"] if subj in replaced}
+        r["appliesTo"] = [subj for subj in r["appliesTo"] if subj not in replaced]
 
     packages = []
     for n in graph["nodes"]:
@@ -517,6 +577,8 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
         "configurations": configurations,
         "missionTypes": mission_types,
         "missions": missions,
+        "missionRequirements": mission_requirements,
+        "assignments": assignments,
         "requirements": requirements,
         "simulations": simulations,
         "evidence": evidence,
@@ -629,13 +691,18 @@ def step_names(behaviors: list[str]) -> list[str]:
     return out
 
 
-def mission_text(name: str, type_ref: str, steps: list[tuple[str, str, dict[str, str]]], doc: str = "") -> list[str]:
-    """A mission: ``steps`` are (step name, behavior reference, quantity -> expression), in order."""
+def mission_text(
+    name: str, type_ref: str, steps: list[tuple[str, str, dict[str, str]]], doc: str = "", keyword: str = "action", objective: list[str] | None = None,
+) -> list[str]:
+    """A mission: ``steps`` are (step name, behavior reference, quantity -> expression),
+    in order. ``keyword`` is ``use case`` for a use-case mission type; ``objective``
+    (lines) keeps the mission's own requirements."""
     check_name(name)
     inner = []
     if doc.strip():
         check_doc(doc)
         inner.append(f"doc /* {doc.strip()} */")
+    inner += objective or []
     if steps:
         inner.append("first start;")
         for step, behavior_ref, values in steps:
@@ -652,8 +719,8 @@ def mission_text(name: str, type_ref: str, steps: list[tuple[str, str, dict[str,
             inner.append(f"then action {step} : {behavior_ref}" + (f" {{ {' '.join(body)} }}" if body else ";"))
         inner.append("then done;")
     if not inner:
-        return [f"action {name} : {type_ref};"]
-    return [f"action {name} : {type_ref} {{", *_body(inner), "}"]
+        return [f"{keyword} {name} : {type_ref};"]
+    return [f"{keyword} {name} : {type_ref} {{", *_body(inner), "}"]
 
 
 def component_text(

@@ -53,10 +53,16 @@ export function ControlPanel({ projectId, catalog, arch, selected, onSelect, ens
   const [evidence, setEvidence] = useState<EvidenceRecord[]>([]);
 
   const sel = configs.find((c) => c.qualifiedName === selected) || null;
-  const reqs = arch.systemRequirements;
-  const docs = Object.fromEntries(catalog.requirements.map((r) => [r.qualifiedName, r.doc || ""]));
-  const tests = new Set(catalog.requirements.filter((r) => r.isTest).map((r) => r.qualifiedName));
-  const isTest = (q: string) => tests.has(q);
+  // the specification's instances of the types the control simulation verifies that
+  // apply to one of these systems (an instance a system satisfies replaces the general one)
+  const verified = new Set(verifyDefs.flatMap((q) => sims.get(q)?.verifies || []));
+  const instances = catalog.specification.filter(
+    (r) => r.type && verified.has(r.type) && r.measured.length && configs.some((c) => r.appliesTo.includes(c.qualifiedName))
+  );
+  const reqs = instances.map((r) => r.qualifiedName);
+  const byQn = new Map(instances.map((r) => [r.qualifiedName, r]));
+  const docs = Object.fromEntries(instances.map((r) => [r.qualifiedName, `${r.shortName ? `${r.shortName} ` : ""}${r.doc || ""}`]));
+  const isTest = (q: string) => !!byQn.get(q)?.isTest;
 
   const simulate = async () => {
     if (!(await ensureSaved())) return;
@@ -170,7 +176,7 @@ export function ControlPanel({ projectId, catalog, arch, selected, onSelect, ens
       {note && <div className="hint">{note}</div>}
       {!res && !tune && (
         <div className="hint">
-          Simulate to fly the control tests and check {reqs.map(short).join(", ") || "the control requirements"} for every system instance; each needs a {controllerSlot ? <code>{controllerSlot}</code> : "controller"} with gains. The tests are requirements tagged #ControlTest that ControlSimulation verifies: change them in the model to fly other manoeuvres. Select a system and tune its controller to propose gains.
+          Simulate to fly the control tests and check {reqs.map(short).join(", ") || "the control requirements"} for every system instance; each needs a {controllerSlot ? <code>{controllerSlot}</code> : "controller"} with gains. The tests are instances, in the specification, of requirement types tagged #ControlTest that ControlSimulation verifies, each setting its limits: add or change instances to fly other manoeuvres, or give one system its own with a satisfy relation. Select a system and tune its controller to propose gains.
         </div>
       )}
 
@@ -183,8 +189,10 @@ export function ControlPanel({ projectId, catalog, arch, selected, onSelect, ens
                 <th>Controller</th>
                 {reqs.map((q) => (
                   <th key={q} title={docs[q]}>
-                    {short(q).replace(/Requirement$/, "")}
-                    <div className="muted small">{isTest(q) ? "◆ test" : "◆ simulated"}</div>
+                    {short(q)}
+                    <div className="muted small">
+                      {byQn.get(q)?.shortName} {isTest(q) ? "◆ test" : "◆ simulated"}
+                    </div>
                   </th>
                 ))}
                 <th className="num" title="Smallest phase margin over the loops">Phase margin</th>
@@ -208,6 +216,14 @@ export function ControlPanel({ projectId, catalog, arch, selected, onSelect, ens
                     ) : (
                       <>
                         {reqs.map((q) => {
+                          if (!byQn.get(q)?.appliesTo.includes(c.qualifiedName)) {
+                            const by = byQn.get(q)?.replacedFor?.[c.qualifiedName];
+                            return (
+                              <td key={q} className="muted small" title={by ? `${c.name} satisfies ${short(by)} instead` : "does not apply"}>
+                                {by ? "↷" : "n/a"}
+                              </td>
+                            );
+                          }
                           const v = r?.verdicts[q];
                           const ver = r?.verification[q];
                           return (

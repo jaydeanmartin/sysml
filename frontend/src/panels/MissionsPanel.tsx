@@ -258,7 +258,17 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
   const flyerQn = flyer && draftResults?.[flyer] ? flyer : Object.keys(draftResults || {}).find((k) => !draftResults![k].problems.length) || null;
   const flight = flyerQn ? draftResults?.[flyerQn] : undefined;
   const timeTotal = totals[0];
-  const reqDocs = Object.fromEntries(catalog.requirements.map((r) => [r.qualifiedName, r.doc || ""]));
+  const reqDocs = Object.fromEntries([...catalog.requirements, ...catalog.missionRequirements].map((r) => [r.qualifiedName, r.doc || ""]));
+  // mission requirement instances, labelled by their id
+  const reqLabels = Object.fromEntries(catalog.missionRequirements.map((r) => [r.qualifiedName, `${r.shortName ? `${r.shortName} ` : ""}${r.name}`]));
+  const assigned = new Set(current && !stepsChanged ? current.assignedTo : []);
+  const assign = async (system: string) => {
+    if (!current) return;
+    const next = current.assignedTo.includes(system) ? current.assignedTo.filter((q) => q !== system) : [...current.assignedTo, system];
+    await run(() => api.assignMission(projectId, current.qualifiedName, next));
+  };
+  // what the mission requires of the drones flying it: its type's objective, then its own
+  const missionReqs = catalog.missionRequirements.filter((r) => mtype.requirements.includes(r.qualifiedName) || (current && current.requirements.includes(r.qualifiedName)));
   const savedMission = current && !stepsChanged ? current.qualifiedName : null;
   const record = async (resultId: string) => {
     setRecordNote(null);
@@ -462,9 +472,35 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
                 </div>
 
                 <code className="block">{preview}</code>
+                {current && !stepsChanged && (
+                  <div className="assign-row">
+                    <span className="small muted" title="Allocations of the mission to system instances: the mission's requirements apply to these drones">
+                      Assigned to
+                    </span>
+                    {catalog.configurations.map((c) => (
+                      <button key={c.id} className={`chip-toggle${current.assignedTo.includes(c.qualifiedName) ? " on" : ""}`} disabled={busy} aria-pressed={current.assignedTo.includes(c.qualifiedName)} onClick={() => assign(c.qualifiedName)}>
+                        {c.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {missionReqs.length > 0 && (
+                  <div className="small">
+                    <span className="muted">Requires of the drones flying it: </span>
+                    {missionReqs.map((r, i) => (
+                      <span key={r.qualifiedName} title={`${r.doc || ""}\n${short(r.type)}: ${r.parameters.filter((p) => p.bound).map((p) => `${p.name} ${p.value}`).join(", ")}${r.owner === mtype.qualifiedName ? `\nfrom ${mtype.name}'s objective` : "\nthis mission's own"}`}>
+                        {i > 0 && " · "}
+                        <span className="mono">{r.shortName}</span> {r.name}
+                        {r.owner !== mtype.qualifiedName && <span className="pill spec-explicit">own</span>}
+                      </span>
+                    ))}
+                  </div>
+                )}
                 {draftResults && (
                   <>
                     <VerificationTable
+                      labels={reqLabels}
+                      assigned={assigned}
                       results={draftResults}
                       docs={reqDocs}
                       mission={savedMission}
@@ -538,8 +574,10 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
                         <td className="num small">{m.steps.length}</td>
                         {fliers.map((c) => {
                           const r = evaluation?.missions[m.qualifiedName]?.[c.qualifiedName];
+                          const isAssigned = m.assignedTo.includes(c.qualifiedName);
                           return (
-                            <td key={c.id}>
+                            <td key={c.id} className={isAssigned ? "assigned-cell" : ""} title={isAssigned ? `${m.name} is assigned to ${c.name}: its requirements apply` : undefined}>
+                              {isAssigned && <div className="small assigned-mark">★ assigned</div>}
                               {r ? (
                                 <>
                                   <FlightPill r={r} />
@@ -599,6 +637,8 @@ function how(v?: Verification): string {
 
 /** each system's verdict on each mission requirement, and how it was verified */
 function VerificationTable({
+  labels = {},
+  assigned = new Set<string>(),
   results,
   docs,
   mission,
@@ -615,6 +655,8 @@ function VerificationTable({
   busy: boolean;
   onRecord(resultId: string): void;
   onOpen(el: Located): void;
+  labels?: Record<string, string>;
+  assigned?: Set<string>;
 }) {
   const reqs = [...new Set(Object.values(results).flatMap((r) => Object.keys(r.verification || {})))];
   const withSims = Object.values(results).some((r) => Object.keys(r.simulations || {}).length);
@@ -630,7 +672,7 @@ function VerificationTable({
               const m = method(q);
               return (
                 <th key={q} title={docs[q]}>
-                  {short(q)}
+                  {labels[q] || short(q)}
                   <div className="muted small">{m?.method === "simulation" ? `◆ simulated · ${short(m.by)}` : "○ estimated · mission totals"}</div>
                 </th>
               );
@@ -640,8 +682,11 @@ function VerificationTable({
         </thead>
         <tbody>
           {Object.entries(results).map(([qn, r]) => (
-            <tr key={qn}>
-              <td className="mono strong">{short(qn)}</td>
+            <tr key={qn} className={assigned.has(qn) ? "assigned-row" : ""}>
+              <td className="mono strong">
+                {short(qn)}
+                {assigned.size > 0 && <div className="small muted">{assigned.has(qn) ? "★ assigned" : "candidate"}</div>}
+              </td>
               {r.problems.length ? (
                 <td colSpan={reqs.length + (withSims ? 1 : 0)} className="muted small">
                   ⊘ {r.problems.join("; ")}

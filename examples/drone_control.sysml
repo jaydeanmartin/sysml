@@ -3,92 +3,15 @@ package DroneControl {
     private import AnalysisTooling::*;
     private import DroneLibrary::*;
     private import DroneArchitectures::*;
+    private import DroneRequirements::Types::*;
 
     // ---------------------------------------------------------- control requirements
-    // Checked with the results of the ControlSimulation that verifies them, for
-    // every system instance (Configurator tab, Controllability): the margins and
-    // authority below, and the control tests after them.
-    requirement def ControlStabilityRequirement {
-        doc /* Every control loop shall keep at least 45° of phase margin and 6 dB of gain margin. */
-        subject drone : DeliveryDrone;
-        in phaseMargin : Real;                  // deg, the smallest over the loops
-        in gainMargin : Real;                   // dB
-        require constraint { phaseMargin >= 45 and gainMargin >= 6 }
-    }
-    requirement def ControlAuthorityRequirement {
-        doc /* The rotors shall lift 1.8 times the takeoff weight, reach the fastest commanded turn rate within half a second, and stay off their limits 95 % of the time in every control test. */
-        subject drone : DeliveryDrone;
-        in thrustMargin : Real;                 // maximum thrust / hover thrust
-        in yawAuthority : Real;                 // yaw acceleration available / needed
-        in saturation : Real;                   // % of a manoeuvre with a rotor at its limit
-        require constraint { thrustMargin >= 1.8 and yawAuthority >= 1 and saturation <= 5 }
-    }
-
-    // ---------------------------------------------------------- control tests
-    // Each test is a requirement the ControlSimulation verifies by flying it:
-    // from a settled hover, a step of one command, held for `hold` s. Its
-    // attributes say what to fly (`command`: climbRate, speed, heading or gust;
-    // `step`, and for a turn its `rate`), its in parameters which results it is
-    // checked with (riseTime, settlingTime, overshoot, maxTrackingError,
-    // maxDeviation, finalError, saturation, maxTilt). Add a test by defining one
-    // and verifying it in ControlSimulation's objective.
-    metadata def ControlTest {
-        doc /* A closed-loop manoeuvre the control simulation flies, specified and accepted by the requirement it tags. */
-    }
-    #ControlTest requirement def ClimbStepTest {
-        doc /* From hover, the climb rate the drone takes off with shall settle within 4 s, with at most 20 % overshoot and no rotor at its limit more than 5 % of the time. */
-        subject drone : DeliveryDrone;
-        attribute command : String = "climbRate";
-        attribute step : Real = drone.takeoff.climbRate;      // m/s
-        attribute hold : Real = 4;                            // s
-        in settlingTime : Real;
-        in overshoot : Real;
-        in saturation : Real;
-        require constraint { settlingTime <= 4 and overshoot <= 20 and saturation <= 5 }
-    }
-    #ControlTest requirement def DescentStepTest {
-        doc /* From hover, the descent rate the drone lands with shall settle within 4 s, with at most 20 % overshoot. */
-        subject drone : DeliveryDrone;
-        attribute command : String = "climbRate";
-        attribute step : Real = -drone.land.descentRate;      // m/s
-        attribute hold : Real = 4;
-        in settlingTime : Real;
-        in overshoot : Real;
-        require constraint { settlingTime <= 4 and overshoot <= 20 }
-    }
-    #ControlTest requirement def SpeedStepTest {
-        doc /* From hover, the cruise speed shall settle within 5 s with at most 15 % overshoot, tilting at most 35° and with no rotor at its limit more than 5 % of the time. */
-        subject drone : DeliveryDrone;
-        attribute command : String = "speed";
-        attribute step : Real = drone.cruise.speed;           // m/s
-        attribute hold : Real = 9;
-        in settlingTime : Real;
-        in overshoot : Real;
-        in maxTilt : Real;
-        in saturation : Real;
-        require constraint { settlingTime <= 5 and overshoot <= 15 and maxTilt <= 35 and saturation <= 5 }
-    }
-    #ControlTest requirement def TurnTest {
-        doc /* A 90° turn at the drone's turn rate shall lag the commanded heading by at most 10° and settle within 3 s of the end of the turn. */
-        subject drone : DeliveryDrone;
-        attribute command : String = "heading";
-        attribute step : Real = 90;                           // deg
-        attribute rate : Real = drone.turn.yawRate;           // deg/s
-        attribute hold : Real = 4;
-        in settlingTime : Real;
-        in maxTrackingError : Real;
-        require constraint { settlingTime <= 3 and maxTrackingError <= 10 }
-    }
-    #ControlTest requirement def GustTest {
-        doc /* Holding position, the drone shall stay within 1 m when a 5 m/s gust hits it, and be back within 0.25 m after 7 s. */
-        subject drone : DeliveryDrone;
-        attribute command : String = "gust";
-        attribute step : Real = 5;                            // m/s of wind
-        attribute hold : Real = 7;
-        in maxDeviation : Real;
-        in finalError : Real;
-        require constraint { maxDeviation <= 1 and finalError <= 0.25 }
-    }
+    // Their types are in DroneRequirements::Types (ControlStability,
+    // ControlAuthority and the #ControlTest types), their instances, with the
+    // limits each system must meet, in the specification (SYS-4). The
+    // ControlSimulation below verifies the types: for a system instance it flies
+    // every control test instance that applies to the system and checks every
+    // instance with its results (Configurator tab, Controllability).
 
     // ---------------------------------------------------------- control simulations
     // External analysis controlSimulator (mission simulator service): a 6-DOF
@@ -97,7 +20,7 @@ package DroneControl {
     // system instance on its own (#SystemSimulation), with the behaviors it
     // performs (each one's parameters are added as the input "behaviors").
     #SystemSimulation verification def ControlSimulation {
-        doc /* Flies the control tests its objective verifies, closed-loop with the gains of the system's flight controller, and checks the stability margins and control authority. */
+        doc /* Flies the control test instances that apply to the system (each a type its objective verifies), closed-loop with the gains of the system's flight controller, and checks the stability margins and control authority. */
         metadata ToolExecution { toolName = "controlSimulator"; uri = "analysis://controlSimulator"; }
         subject drone : DeliveryDrone;
         in mode : String = "verify";
@@ -142,8 +65,8 @@ package DroneControl {
         out yawAuthority : Real;
         out saturation : Real;                                              // % of the tests' time, the largest
         objective {
-            verify requirement stability : ControlStabilityRequirement;
-            verify requirement authority : ControlAuthorityRequirement;
+            verify requirement stability : ControlStability;
+            verify requirement authority : ControlAuthority;
             verify requirement climb : ClimbStepTest;
             verify requirement descent : DescentStepTest;
             verify requirement speed : SpeedStepTest;

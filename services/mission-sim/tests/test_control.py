@@ -97,6 +97,13 @@ def test_a_bad_test_fails_alone(tuned):
     assert r["testResults"]["T::Snap"]["settlingTime"] is not None and r["testResults"]["T::Down"]["overshoot"] < 25
 
 
+def test_a_half_turn_is_measured_through_180_degrees(tuned):
+    gains = {k: tuned[k] for k in control.GAIN_NAMES}
+    r = control.simulate({**QUAD, **gains, "mode": "verify", "tests": [{"requirement": "T::Half", "command": "heading", "step": 180, "rate": 45, "hold": 4}]})
+    half = r["testResults"]["T::Half"]
+    assert half["maxTrackingError"] < 10 and half["finalError"] < 2  # not 360° when the heading wraps to -180°
+
+
 def test_rest_contract(tuned):
     gains = {k: tuned[k] for k in control.GAIN_NAMES}
     body = {"inputs": {**QUAD, **gains, "mode": "verify", "tests": [{"requirement": "T::Turn", "command": "heading", "step": {"value": 90}, "rate": 45}]}}

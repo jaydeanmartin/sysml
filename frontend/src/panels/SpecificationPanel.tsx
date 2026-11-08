@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import type { RequirementCheck, SpecRequirement, SpecVerdict } from "../types";
+import type { MissionRequirement, RequirementCheck, SpecRequirement, SpecVerdict } from "../types";
 import { errorText, short, type CatalogPanelProps } from "./catalogUtil";
 
 type View = "system" | "component";
@@ -67,6 +67,42 @@ export function SpecificationPanel({ projectId, catalog, loading, error, ensureS
     return out;
   }, [spec, children, levels, view, collapsed]);
 
+  // mission requirements (system view): each mission type's objective, then the missions that add their own;
+  // they apply to the drones the missions are assigned to
+  const missionRows = useMemo(() => {
+    type Row = { key: string; depth: number; label?: string; kind?: string; doc?: string | null; req?: MissionRequirement; applies: Set<string>; reqs: string[] };
+    const out: Row[] = [];
+    if (view !== "system" || !catalog) return out;
+    const reqBy = new Map(catalog.missionRequirements.map((r) => [r.qualifiedName, r]));
+    for (const t of catalog.missionTypes) {
+      const ms = catalog.missions.filter((m) => m.missionTypeId === t.id);
+      const own = (t.requirements || []).map((q) => reqBy.get(q)).filter((r): r is MissionRequirement => !!r);
+      if (!own.length && !ms.some((m) => m.requirements.length)) continue;
+      const typeApplies = new Set(ms.flatMap((m) => m.assignedTo));
+      out.push({ key: t.qualifiedName, depth: 0, label: t.name, kind: "mission type", doc: t.doc, applies: typeApplies, reqs: own.map((r) => r.qualifiedName) });
+      if (collapsed.has(t.qualifiedName)) continue;
+      for (const r of own) out.push({ key: r.qualifiedName, depth: 1, req: r, applies: typeApplies, reqs: [r.qualifiedName] });
+      for (const m of ms.filter((x) => x.requirements.length)) {
+        const applies = new Set(m.assignedTo);
+        out.push({ key: m.qualifiedName, depth: 1, label: m.name, kind: "mission", doc: m.doc, applies, reqs: m.requirements });
+        for (const q of m.requirements) {
+          const r = reqBy.get(q);
+          if (r) out.push({ key: q, depth: 2, req: r, applies, reqs: [q] });
+        }
+      }
+    }
+    return out;
+  }, [catalog, view, collapsed]);
+  const rank: Record<SpecVerdict, number> = { fails: 3, error: 2, unverified: 1, holds: 0 };
+  const missionVerdict = (reqs: string[], subj: string): SpecVerdict | undefined => {
+    let worst: SpecVerdict | undefined;
+    for (const q of reqs) {
+      const v = check?.missionVerdicts?.[q]?.[subj];
+      if (v && (!worst || rank[v] > rank[worst])) worst = v;
+    }
+    return worst;
+  };
+
   const run = async () => {
     if (!(await ensureSaved())) return;
     setRunning(true);
@@ -111,7 +147,9 @@ export function SpecificationPanel({ projectId, catalog, loading, error, ensureS
   const leaves = spec.filter((r) => r.type && r.level === view);
   const tally = { holds: 0, fails: 0, error: 0, unverified: 0 } as Record<SpecVerdict, number>;
   if (check) for (const r of leaves) for (const v of Object.values(check.verdicts[r.qualifiedName] || {})) tally[v]++;
-  const selected = sel ? byQn.get(sel) : undefined;
+  if (check && view === "system") for (const per of Object.values(check.missionVerdicts || {})) for (const v of Object.values(per)) tally[v]++;
+  const selectedMission = sel ? catalog.missionRequirements.find((r) => r.qualifiedName === sel) : undefined;
+  const selected = sel ? byQn.get(sel) || selectedMission : undefined;
 
   return (
     <div className="panel lib">
@@ -131,7 +169,7 @@ export function SpecificationPanel({ projectId, catalog, loading, error, ensureS
             <span className="pill ok">✓ {tally.holds}</span>
             <span className="pill bad">✗ {tally.fails}</span>
             {tally.error > 0 && <span className="pill bad">? {tally.error}</span>}
-            {tally.unverified > 0 && <span className="pill">◇ {tally.unverified} by simulation</span>}
+            {tally.unverified > 0 && <span className="pill" title="Checked with measured values no simulation supplies yet">◇ {tally.unverified} unverified</span>}
           </span>
         )}
         {(loading || running) && <span className="hint">{running ? "Evaluating…" : "Refreshing…"}</span>}
@@ -190,12 +228,79 @@ export function SpecificationPanel({ projectId, catalog, loading, error, ensureS
                     {!r.type && r.doc && <div className="muted small spec-doc">{r.doc}</div>}
                   </td>
                   {columns.map((c) => {
+                    const by = r.replacedFor?.[c.qn];
+                    if (by)
+                      return (
+                        <td key={c.qn} className="spec-col muted" title={`replaced for ${c.name} by ${byQn.get(by)?.shortName || short(by)}, which it satisfies`}>
+                          ↷
+                        </td>
+                      );
                     if (!here.has(c.qn)) return <td key={c.qn} className="spec-col" />;
                     const v = verdicts[c.qn];
                     if (!v) return <td key={c.qn} className="spec-col muted" title="applies">·</td>;
                     const [cls, sym] = PILL[v];
+                    const sim = r.type ? check?.systemDetail?.[r.qualifiedName]?.[c.qn] : undefined;
+                    const how = sim
+                      ? `\nby ${short(sim.simulation)}${sim.note ? `: ${sim.note}` : ""}${Object.entries(sim.values || {}).map(([k, x]) => `\n${k} ${typeof x === "number" ? Number(x.toPrecision(3)) : x}`).join("")}`
+                      : "";
                     return (
-                      <td key={c.qn} className="spec-col" title={`${r.shortName || r.name} for ${c.name}: ${v}`}>
+                      <td key={c.qn} className="spec-col" title={`${r.shortName || r.name} for ${c.name}: ${v}${how}`}>
+                        <span className={`pill ${cls}`}>{sym}</span>
+                      </td>
+                    );
+                  })}
+                </tr>
+              );
+            })}
+            {missionRows.length > 0 && (
+              <tr className="spec-section">
+                <td colSpan={2 + columns.length}>Missions · apply to the drones each mission is assigned to</td>
+              </tr>
+            )}
+            {missionRows.map((row) => {
+              const toggle = row.label && row.kind === "mission type";
+              return (
+                <tr key={`m:${row.key}`} className={`clickable${sel === row.key ? " row-on" : ""}${row.req ? "" : " spec-statement"}`} onClick={() => row.req && setSel(row.key)}>
+                  <td className="mono small spec-id">{row.req?.shortName || ""}</td>
+                  <td className="spec-name" style={{ paddingLeft: 6 + row.depth * 16 }}>
+                    {toggle && (
+                      <button
+                        className="link spec-toggle"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          const next = new Set(collapsed);
+                          if (next.has(row.key)) next.delete(row.key);
+                          else next.add(row.key);
+                          setCollapsed(next);
+                        }}
+                      >
+                        {collapsed.has(row.key) ? "▸" : "▾"}
+                      </button>
+                    )}
+                    {row.req ? (
+                      <>
+                        <span className="mono">{row.req.name}</span>
+                        <span className="muted small">
+                          {" "}
+                          : {short(row.req.type)}
+                          {row.req.parameters.filter((p) => p.bound).map((p) => ` · ${p.name} ${p.value}`)}
+                        </span>
+                      </>
+                    ) : (
+                      <>
+                        <span className="mono strong">{row.label}</span> <span className="muted small">{row.kind}</span>
+                        {row.doc && <div className="muted small spec-doc">{row.doc}</div>}
+                      </>
+                    )}
+                  </td>
+                  {columns.map((c) => {
+                    if (!row.applies.has(c.qn)) return <td key={c.qn} className="spec-col" />;
+                    const v = missionVerdict(row.reqs, c.qn);
+                    if (!v) return <td key={c.qn} className="spec-col muted" title="applies: an assigned mission">·</td>;
+                    const [cls, sym] = PILL[v];
+                    const detail = row.req ? Object.entries(check?.missionDetail?.[row.req.qualifiedName]?.[c.qn] || {}).map(([m, x]) => `${short(m)}: ${x}`).join("\n") : "";
+                    return (
+                      <td key={c.qn} className="spec-col" title={`${row.req?.shortName || row.label} for ${c.name}: ${v}${detail ? `\n${detail}` : ""}`}>
                         <span className={`pill ${cls}`}>{sym}</span>
                       </td>
                     );
@@ -207,15 +312,38 @@ export function SpecificationPanel({ projectId, catalog, loading, error, ensureS
         </table>
       </div>
 
-      {selected && <Detail r={selected} kids={children.get(selected.qualifiedName) || []} check={check} onOpen={onOpen} typeOf={(q) => catalog.requirements.find((x) => x.qualifiedName === q)} />}
+      {selected && <Detail
+          r={selected}
+          kids={children.get(selected.qualifiedName) || []}
+          check={check}
+          byQn={byQn}
+          onOpen={onOpen}
+          typeOf={(q) => catalog.requirements.find((x) => x.qualifiedName === q)}
+          mission={
+            selectedMission
+              ? {
+                  owner: selectedMission.owner,
+                  drones: [...new Set(catalog.missions.filter((m) => m.qualifiedName === selectedMission.owner || m.missionType === selectedMission.owner).flatMap((m) => m.assignedTo))],
+                }
+              : undefined
+          }
+        />}
     </div>
   );
 }
 
 /** One requirement: its statement, type, parameters, constraint and applicability. */
-function Detail({ r, kids, check, onOpen, typeOf }: { r: SpecRequirement; kids: SpecRequirement[]; check: RequirementCheck | null; onOpen: CatalogPanelProps["onOpen"]; typeOf(q: string): import("../types").CatalogRequirement | undefined }) {
+function Detail({
+  r, kids, check, onOpen, typeOf, mission, byQn,
+}: {
+  r: SpecRequirement; kids: SpecRequirement[]; check: RequirementCheck | null; onOpen: CatalogPanelProps["onOpen"];
+  byQn: Map<string, SpecRequirement>;
+  typeOf(q: string): import("../types").CatalogRequirement | undefined;
+  /** for a mission requirement: whose objective holds it, and the drones its missions are assigned to */
+  mission?: { owner: string; drones: string[] };
+}) {
   const type = r.type ? typeOf(r.type) : undefined;
-  const v = check ? (r.type ? check.verdicts[r.qualifiedName] : check.rollup[r.qualifiedName]) || {} : null;
+  const v = check ? (mission ? check.missionVerdicts?.[r.qualifiedName] : r.type ? check.verdicts[r.qualifiedName] : check.rollup[r.qualifiedName]) || {} : null;
   const failing = v ? Object.entries(v).filter(([, x]) => x === "fails" || x === "error") : [];
   return (
     <div className="form-card">
@@ -251,7 +379,13 @@ function Detail({ r, kids, check, onOpen, typeOf }: { r: SpecRequirement; kids: 
                 {c.kind} {c.text}
               </code>
             ))}
-            {r.measured.length > 0 && <div className="hint small">Checked with measured values ({r.measured.join(", ")}) that a simulation supplies.</div>}
+            {r.measured.length > 0 && (
+              <div className="hint small">
+                Checked with measured values ({r.measured.join(", ")}) that a simulation supplies
+                {type?.verifiedBy?.length ? <>: <span className="mono">{type.verifiedBy.map(short).join(", ")}</span></> : ""}.
+                {r.isTest && " A control test: the simulation flies it for each system it applies to."}
+              </div>
+            )}
           </div>
           <div>
             <div className="section-title">Parameters</div>
@@ -261,7 +395,10 @@ function Detail({ r, kids, check, onOpen, typeOf }: { r: SpecRequirement; kids: 
                   <tr key={p.name}>
                     <td className="mono">{p.name}</td>
                     <td className="mono">{p.value ?? <span className="error-text">unset</span>}</td>
-                    <td className="muted small">{p.bound ? "set here" : p.value ? "the type's" : ""}</td>
+                    <td className="muted small">
+                      {p.bound ? "set here" : p.value ? "the type's" : ""}
+                      {r.isTest && p.name in r.flies ? " · flown" : r.isTest ? " · limit" : ""}
+                    </td>
                   </tr>
                 ))}
                 {!r.parameters.length && (
@@ -273,7 +410,12 @@ function Detail({ r, kids, check, onOpen, typeOf }: { r: SpecRequirement; kids: 
             </table>
             <div className="section-title">Applies to</div>
             <div className="small">
-              {r.explicit ? (
+              {mission ? (
+                <>
+                  the drones {short(mission.owner)}'s missions are assigned to: <span className="mono">{mission.drones.map(short).join(", ") || "none yet"}</span>
+                  <div className="muted">In the objective of {short(mission.owner)}; checked with measured values when those missions are flown.</div>
+                </>
+              ) : r.explicit ? (
                 <>
                   <span className="mono">{r.satisfiedBy.map(short).join(", ")}</span> <span className="muted">(satisfy)</span>
                 </>
@@ -282,7 +424,40 @@ function Detail({ r, kids, check, onOpen, typeOf }: { r: SpecRequirement; kids: 
                   every <span className="mono">{short(r.subjectType)}</span>: {r.appliesTo.map(short).join(", ") || "none yet"}
                 </>
               )}
+              {Object.entries(r.replacedFor || {}).map(([subj, by]) => (
+                <div key={subj} className="muted">
+                  ↷ not for <span className="mono">{short(subj)}</span>: it satisfies <span className="mono">{byQn.get(by)?.shortName || ""} {short(by)}</span> instead
+                </div>
+              ))}
             </div>
+            {check?.systemDetail?.[r.qualifiedName] && (
+              <>
+                <div className="section-title">Simulated</div>
+                <table className="table compact">
+                  <tbody>
+                    {Object.entries(check.systemDetail[r.qualifiedName]).map(([subj, d]) => {
+                      const x = check.verdicts[r.qualifiedName]?.[subj];
+                      return (
+                        <tr key={subj}>
+                          <td className="mono">{short(subj)}</td>
+                          <td>{x && <span className={`pill ${PILL[x][0]}`}>{PILL[x][1]}</span>}</td>
+                          <td className="mono small">
+                            {d.note || Object.entries(d.values || {}).map(([k, val]) => `${k} ${typeof val === "number" ? Number(val.toPrecision(3)) : val}`).join(" · ")}
+                          </td>
+                          <td>
+                            {d.resultId && (
+                              <a href={api.resultUrl(d.resultId)} target="_blank" rel="noreferrer" className="small">
+                                data ↗
+                              </a>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </>
+            )}
           </div>
         </div>
       ) : (

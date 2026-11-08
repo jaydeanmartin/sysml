@@ -3,6 +3,7 @@ import { api } from "../api";
 import type { CatalogAttribute, CatalogChange, Component, ComponentInstance } from "../types";
 import { NAME_RE, partText, placeholder, ref, short, type CatalogPanelProps } from "./catalogUtil";
 import { ComponentPerformance, curveKind } from "./ComponentPerformance";
+import { reqLabel, useComponentChecks, type ComponentCheck } from "./componentChecks";
 
 interface InstanceForm {
   component: string;
@@ -44,6 +45,7 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
   const instances = catalog?.instances || [];
   const byQn = useMemo(() => new Map(components.map((c) => [c.qualifiedName, c])), [components]);
   const comp = components.find((c) => c.qualifiedName === selected) || components[0];
+  const checks = useComponentChecks(projectId, catalog);
 
   useEffect(() => {
     if (!selected && components.length) setSelected(components[0].qualifiedName);
@@ -348,7 +350,12 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
                   {rows.map(({ c, depth }) => (
                     <div key={c.id} className={`lib-item${comp?.id === c.id ? " on" : ""}`} style={{ paddingLeft: 8 + depth * 14 }} onClick={() => setSelected(c.qualifiedName)}>
                       <span className={c.isAbstract ? "em" : ""}>{depth > 0 && <span className="muted">↳ </span>}{c.name}</span>
-                      <span className="count">{instances.filter((i) => i.component === c.qualifiedName).length || ""}</span>
+                      <span className="count">
+                        {instances.some((i) => i.component === c.qualifiedName && checks.failing(i.qualifiedName).length > 0) && (
+                          <span className="fail-dot" title="An instance fails a component requirement" />
+                        )}
+                        {instances.filter((i) => i.component === c.qualifiedName).length || ""}
+                      </span>
                     </div>
                   ))}
                 </div>
@@ -455,7 +462,18 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
                   + New {comp.isAbstract && comp.kind === "part" ? "" : comp.name} instance
                 </button>
               </div>
-              <InstanceTable comp={comp} rows={shown} selected={form?.replace || null} busy={busy} onEdit={editInstance} onDelete={deleteInstance} onOpen={onOpen} />
+              <ComponentRequirements reqs={checks.requirements.filter((r) => shown.some((i) => r.appliesTo.includes(i.qualifiedName)))} onOpen={onOpen} />
+              {checks.error && <div className="error-box">{checks.error}</div>}
+              <InstanceTable
+                comp={comp}
+                rows={shown}
+                selected={form?.replace || null}
+                busy={busy}
+                onEdit={editInstance}
+                onDelete={deleteInstance}
+                onOpen={onOpen}
+                checks={checks.checked ? checks.byInstance : null}
+              />
             </div>
           )}
         </div>
@@ -510,6 +528,52 @@ const KINDS = [
   ["action", "Behaviors"],
 ] as const;
 
+/** The specification's component requirements that apply to the instances shown. */
+function ComponentRequirements({ reqs, onOpen }: { reqs: import("../types").SpecRequirement[]; onOpen(el: import("../types").Located): void }) {
+  if (!reqs.length) return null;
+  return (
+    <>
+      <div className="section-title">
+        Requirements <span className="muted small">(component requirements of the specification that apply here)</span>
+      </div>
+      <ul className="plain small">
+        {reqs.map((r) => (
+          <li key={r.qualifiedName}>
+            <button className="link mono" onClick={() => onOpen(r)} title="Show in editor">
+              {reqLabel(r)}
+            </button>{" "}
+            <span className="muted">
+              : {short(r.type)}
+              {r.parameters.filter((p) => p.bound).map((p) => ` · ${p.name} ${p.value}`)}
+              {r.doc ? ` — ${r.doc}` : ""}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </>
+  );
+}
+
+/** an instance's component requirements: ✓ when all hold, else the failing ones */
+function CheckCell({ checks }: { checks: ComponentCheck[] | undefined }) {
+  if (!checks?.length) return <td className="muted small">—</td>;
+  const bad = checks.filter((c) => c.verdict === "fails" || c.verdict === "error");
+  const detail = checks.map((c) => `${reqLabel(c.requirement)}: ${c.verdict}`).join("\n");
+  return (
+    <td className="small" title={detail}>
+      {bad.length ? (
+        bad.map((c) => (
+          <span key={c.requirement.qualifiedName} className="pill bad">
+            ✗ {c.requirement.shortName || c.requirement.name}
+          </span>
+        ))
+      ) : (
+        <span className="pill ok">✓ {checks.length}</span>
+      )}
+    </td>
+  );
+}
+
 function InstanceTable({
   comp,
   rows,
@@ -518,6 +582,7 @@ function InstanceTable({
   onEdit,
   onDelete,
   onOpen,
+  checks,
 }: {
   comp: Component;
   rows: ComponentInstance[];
@@ -526,6 +591,8 @@ function InstanceTable({
   onEdit(i: ComponentInstance): void;
   onDelete(i: ComponentInstance): void;
   onOpen(i: ComponentInstance): void;
+  /** instance -> its component requirements with verdicts (null: not checked) */
+  checks: Map<string, ComponentCheck[]> | null;
 }) {
   const cols = useMemo(() => {
     const names = fields(comp).map((a) => a.name);
@@ -534,6 +601,7 @@ function InstanceTable({
     return names;
   }, [comp, rows]);
   const mixed = rows.some((r) => r.component !== comp.qualifiedName);
+  const reqCol = !!checks && rows.some((r) => checks.has(r.qualifiedName));
   if (!rows.length) return <div className="muted small">No instances yet.</div>;
   return (
     <div className="table-scroll">
@@ -542,6 +610,7 @@ function InstanceTable({
           <tr>
             <th>Instance</th>
             {mixed && <th>Type</th>}
+            {reqCol && <th title="The specification's component requirements that apply to it">Requirements</th>}
             {cols.map((c) => (
               <th key={c} className="mono">
                 {c}
@@ -559,6 +628,7 @@ function InstanceTable({
                 {r.missing.length > 0 && <span className="pill warn" title="A system instance cannot perform it until every parameter is set">incomplete: {r.missing.join(", ")}</span>}
               </td>
               {mixed && <td className="small">{short(r.component)}</td>}
+              {reqCol && <CheckCell checks={checks!.get(r.qualifiedName)} />}
               {cols.map((c) => (
                 <td key={c} className={`mono small${r.ownValues[c] ? "" : " muted"}`}>
                   {r.values[c] ?? "—"}
