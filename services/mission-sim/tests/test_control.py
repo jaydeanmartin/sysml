@@ -16,16 +16,18 @@ QUAD = {
     "rotorInertia": 4.54e-4, "dragArea": 0.05, "propDiameter": 15, "ct0": 0.105, "cp0": 0.044,
     "motorKv": 400, "motorResistance": 0.1, "motorNoLoadCurrent": 0.5, "motorMaxCurrent": 32, "batteryVoltage": 22.2,
 }
-BEHAVIORS = [
-    {"slot": "takeoff", "behavior": "Takeoff", "climbRate": 3},
-    {"slot": "cruise", "behavior": "Cruise", "speed": 12},
-    {"slot": "turn", "behavior": "Turn", "yawRate": 45},
+# the control tests, as the model's #ControlTest requirements specify them
+TESTS = [
+    {"requirement": "T::Climb", "command": "climbRate", "step": 3, "hold": 4},
+    {"requirement": "T::Speed", "command": "speed", "step": 12, "hold": 9},
+    {"requirement": "T::Turn", "command": "heading", "step": 90, "rate": 45, "hold": 4},
+    {"requirement": "T::Gust", "command": "gust", "step": 5, "hold": 7},
 ]
 
 
 @pytest.fixture(scope="module")
 def tuned():
-    return control.simulate({**QUAD, "mode": "tune", "behaviors": BEHAVIORS})
+    return control.simulate({**QUAD, "mode": "tune", "tests": TESTS})
 
 
 def test_mixer_inverts_the_allocation_and_spins_alternate():
@@ -61,32 +63,49 @@ def test_tuned_loops_have_margin_and_fly_the_manoeuvres(tuned):
     assert all(m["phaseMargin"] >= 45 for m in tuned["margins"].values())
     assert tuned["gainMargin"] >= 6
     assert set(control.GAIN_NAMES) <= set(tuned)  # the proposals, as top-level outputs
-    names = [s["name"] for s in tuned["scenarios"]]
-    assert names == ["takeoff: climb rate step", "cruise: ground speed step", "turn: 90° turn", "hover: 5 m/s gust"]
-    assert tuned["speedSettlingTime"] < 5 and tuned["speedOvershoot"] < 15
-    assert tuned["headingSettlingTime"] < 6
-    assert tuned["gustDeviation"] < 1
+    # exactly the tests given, in order, each under its requirement
+    assert [s["requirement"] for s in tuned["scenarios"]] == [t["requirement"] for t in TESTS]
+    res = tuned["testResults"]
+    assert res["T::Climb"]["settlingTime"] < 4 and res["T::Climb"]["overshoot"] < 20
+    assert res["T::Speed"]["settlingTime"] < 5 and res["T::Speed"]["overshoot"] < 15
+    assert res["T::Speed"]["maxTilt"] <= 32  # the 30° tilt limit holds
+    assert res["T::Turn"]["settlingTime"] < 3 and res["T::Turn"]["maxTrackingError"] < 10
+    assert res["T::Gust"]["maxDeviation"] < 1 and res["T::Gust"]["finalError"] < res["T::Gust"]["maxDeviation"]
+    assert tuned["speedSettlingTime"] == res["T::Speed"]["settlingTime"]  # aggregates follow the tests
     assert tuned["saturation"] < 5 and tuned["completed"] and not tuned["issues"]
-    cruise = next(s for s in tuned["scenarios"] if s["parameter"] == "speed")
-    assert cruise["maxTilt"] <= 32  # the 30° tilt limit holds
 
 
 def test_verify_flies_the_given_gains(tuned):
     gains = {k: tuned[k] for k in control.GAIN_NAMES}
-    same = control.simulate({**QUAD, **gains, "mode": '"verify"', "behaviors": BEHAVIORS[1:2]})  # a SysML string keeps its quotes
+    same = control.simulate({**QUAD, **gains, "mode": '"verify"', "tests": TESTS[1:2]})  # a SysML string keeps its quotes
     assert same["mode"] == "verify" and same["speedSettlingTime"] == pytest.approx(tuned["speedSettlingTime"], abs=0.05)
     # a sluggish velocity loop settles later
-    slow = control.simulate({**QUAD, **gains, "velocityKp": gains["velocityKp"] / 4, "velocityKi": gains["velocityKi"] / 16, "mode": "verify", "behaviors": BEHAVIORS[1:2]})
+    slow = control.simulate({**QUAD, **gains, "velocityKp": gains["velocityKp"] / 4, "velocityKi": gains["velocityKi"] / 16, "mode": "verify", "tests": TESTS[1:2]})
     assert slow["speedSettlingTime"] is None or slow["speedSettlingTime"] > same["speedSettlingTime"]
+
+
+def test_a_bad_test_fails_alone(tuned):
+    gains = {k: tuned[k] for k in control.GAIN_NAMES}
+    r = control.simulate({**QUAD, **gains, "mode": "verify", "tests": [{"requirement": "T::Odd", "command": "loop", "step": 1}, TESTS[0]]})
+    assert not r["completed"] and "T::Odd" not in r["testResults"] and "T::Climb" in r["testResults"]
+    assert any("unknown command" in i for i in r["issues"])
+    # a turn without a rate is a heading step; a descent is a negative climb rate
+    r = control.simulate({**QUAD, **gains, "mode": "verify", "tests": [
+        {"requirement": "T::Snap", "command": "heading", "step": 30, "hold": 4},
+        {"requirement": "T::Down", "command": "climbRate", "step": -2, "hold": 4},
+    ]})
+    assert r["testResults"]["T::Snap"]["settlingTime"] is not None and r["testResults"]["T::Down"]["overshoot"] < 25
 
 
 def test_rest_contract(tuned):
     gains = {k: tuned[k] for k in control.GAIN_NAMES}
-    body = {"inputs": {**QUAD, **gains, "mode": "verify", "behaviors": [{"slot": "turn", "yawRate": {"value": 45}}]}}
+    body = {"inputs": {**QUAD, **gains, "mode": "verify", "tests": [{"requirement": "T::Turn", "command": "heading", "step": {"value": 90}, "rate": 45}]}}
     r = TestClient(app).post("/control", json=body)
     assert r.status_code == 200
     out = r.json()["outputs"]
-    assert out["phaseMargin"]["unit"] == "deg" and out["gustDeviation"]["unit"] == "m"
+    assert out["phaseMargin"]["unit"] == "deg" and out["saturation"]["unit"] == "%"
+    assert out["gustDeviation"] is None  # no gust test was asked for
     assert len(out["mixer"]["rotors"]) == 4 and out["mixer"]["rotors"][0]["spin"] == "ccw"
     assert math.isclose(out["rpmKp"], gains["rpmKp"])
+    assert out["testResults"]["T::Turn"]["settlingTime"] is not None
     assert TestClient(app).post("/control", json={"inputs": {**QUAD, "rotorCount": 5, "mode": "tune"}}).status_code == 422

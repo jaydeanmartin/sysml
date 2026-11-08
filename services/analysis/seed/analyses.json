@@ -334,7 +334,7 @@
   {
     "name": "controlSimulator",
     "kind": "external",
-    "description": "Controllability of a multirotor (mission simulator service): 6-DOF rigid body with rotor and motor dynamics and reaction torques, a command mixer and cascaded PID loops down to each ESC. mode=tune identifies the dynamics from open-loop tests and proposes gains; mode=verify flies a manoeuvre per behavior with the given gains (rpmKp ... positionKp, rpmLoop).",
+    "description": "Controllability of a multirotor (mission simulator service): 6-DOF rigid body with rotor and motor dynamics and reaction torques, a command mixer and cascaded PID loops down to each ESC. mode=tune identifies the dynamics from open-loop tests and proposes gains; mode=verify uses the given gains (rpmKp ... positionKp, rpmLoop). Both fly the control tests given (climb-rate, speed or heading steps, gusts) and report each one's results under testResults[requirement].",
     "endpointUrl": "http://mission-sim:8011/control",
     "inputs": [
       {
@@ -342,8 +342,8 @@
         "description": "tune or verify"
       },
       {
-        "name": "behaviors",
-        "description": "performed behaviors with their parameters (climbRate, speed, yawRate, descentRate)"
+        "name": "tests",
+        "description": "control tests to fly: requirement, command (climbRate, speed, heading, gust), step, rate, hold"
       },
       {
         "name": "rotorCount"
@@ -410,10 +410,6 @@
         "unit": "V"
       },
       {
-        "name": "gustSpeed",
-        "unit": "m/s"
-      },
-      {
         "name": "maxTilt",
         "unit": "deg"
       },
@@ -444,6 +440,9 @@
       },
       {
         "name": "scenarios"
+      },
+      {
+        "name": "testResults"
       },
       {
         "name": "issues"

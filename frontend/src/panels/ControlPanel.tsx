@@ -55,6 +55,8 @@ export function ControlPanel({ projectId, catalog, arch, selected, onSelect, ens
   const sel = configs.find((c) => c.qualifiedName === selected) || null;
   const reqs = arch.systemRequirements;
   const docs = Object.fromEntries(catalog.requirements.map((r) => [r.qualifiedName, r.doc || ""]));
+  const tests = new Set(catalog.requirements.filter((r) => r.isTest).map((r) => r.qualifiedName));
+  const isTest = (q: string) => tests.has(q);
 
   const simulate = async () => {
     if (!(await ensureSaved())) return;
@@ -168,7 +170,7 @@ export function ControlPanel({ projectId, catalog, arch, selected, onSelect, ens
       {note && <div className="hint">{note}</div>}
       {!res && !tune && (
         <div className="hint">
-          Simulate to check {reqs.map(short).join(", ") || "the control requirements"} for every system instance; each needs a {controllerSlot ? <code>{controllerSlot}</code> : "controller"} with gains. Select a system and tune its controller to propose them.
+          Simulate to fly the control tests and check {reqs.map(short).join(", ") || "the control requirements"} for every system instance; each needs a {controllerSlot ? <code>{controllerSlot}</code> : "controller"} with gains. The tests are requirements tagged #ControlTest that ControlSimulation verifies: change them in the model to fly other manoeuvres. Select a system and tune its controller to propose gains.
         </div>
       )}
 
@@ -182,14 +184,11 @@ export function ControlPanel({ projectId, catalog, arch, selected, onSelect, ens
                 {reqs.map((q) => (
                   <th key={q} title={docs[q]}>
                     {short(q).replace(/Requirement$/, "")}
-                    <div className="muted small">◆ simulated</div>
+                    <div className="muted small">{isTest(q) ? "◆ test" : "◆ simulated"}</div>
                   </th>
                 ))}
                 <th className="num" title="Smallest phase margin over the loops">Phase margin</th>
                 <th className="num" title="Maximum thrust over hover thrust">Thrust margin</th>
-                <th className="num" title="Speed step: settling time">Speed settles</th>
-                <th className="num" title="90° turn: settling time after the turn">Turn settles</th>
-                <th className="num" title="Largest position error in the gust">Gust</th>
                 <th>Evidence</th>
               </tr>
             </thead>
@@ -203,7 +202,7 @@ export function ControlPanel({ projectId, catalog, arch, selected, onSelect, ens
                     <td className="mono strong">{c.name}</td>
                     <td className="mono small">{controllerSlot && c.assignments[controllerSlot] ? short(c.assignments[controllerSlot]) : <span className="muted">— none —</span>}</td>
                     {r?.error ? (
-                      <td colSpan={reqs.length + 5} className="muted small">
+                      <td colSpan={reqs.length + 2} className="muted small">
                         ⊘ {r.error}
                       </td>
                     ) : (
@@ -219,9 +218,6 @@ export function ControlPanel({ projectId, catalog, arch, selected, onSelect, ens
                         })}
                         <td className="mono num">{o ? `${fmt(o.phaseMargin)}°` : "—"}</td>
                         <td className="mono num">{o ? fmt(o.thrustMargin) : "—"}</td>
-                        <td className="mono num">{o?.speedSettlingTime != null ? `${fmt(o.speedSettlingTime)} s` : "—"}</td>
-                        <td className="mono num">{o?.headingSettlingTime != null ? `${fmt(o.headingSettlingTime)} s` : "—"}</td>
-                        <td className="mono num">{o?.gustDeviation != null ? `${fmt(o.gustDeviation)} m` : "—"}</td>
                       </>
                     )}
                     <td className="nowrap small" onClick={(e) => e.stopPropagation()}>
@@ -255,7 +251,7 @@ export function ControlPanel({ projectId, catalog, arch, selected, onSelect, ens
           <div className="section-title">
             {sel.name}: manoeuvres with {controllerSlot && sel.assignments[controllerSlot] ? short(sel.assignments[controllerSlot]) : "its controller"}
           </div>
-          <Scenarios o={selRun.outputs} />
+          <Scenarios o={selRun.outputs} run={selRun} docs={docs} />
           <LoopDetails o={selRun.outputs} />
         </>
       )}
@@ -267,11 +263,12 @@ export function ControlPanel({ projectId, catalog, arch, selected, onSelect, ens
   );
 }
 
-/** Each manoeuvre: the response against the command, and its step metrics. */
-function Scenarios({ o }: { o: ControlOutputs }) {
+/** Each control test: the response against the command, its results and, when
+ *  verified, its requirement's verdict. */
+function Scenarios({ o, run, docs = {} }: { o: ControlOutputs; run?: SystemRun; docs?: Record<string, string> }) {
   const line = (s: ControlScenario, k: string) => s.series.map((p) => ({ x: p.t, y: p[k] }));
   const metric = (s: ControlScenario) =>
-    s.parameter === "gustSpeed"
+    s.command === "gust"
       ? `largest error ${fmt(s.maxDeviation)} m · back to ${fmt(s.finalError)} m`
       : [
           s.riseTime != null ? `rise ${fmt(s.riseTime)} s` : null,
@@ -284,8 +281,26 @@ function Scenarios({ o }: { o: ControlOutputs }) {
   return (
     <>
       <div className="multiples">
-        {o.scenarios.map((s) => (
-          <div key={s.name}>
+        {o.scenarios.map((s) => {
+          const v = s.requirement ? run?.verdicts[s.requirement] : undefined;
+          const head = (
+            <div className="row-between small">
+              <span className="strong" title={s.requirement ? docs[s.requirement] : undefined}>
+                {s.requirement ? short(s.requirement) : s.name}
+              </span>
+              {v && <span className={`pill ${v === "holds" ? "ok" : "bad"}`}>{v === "holds" ? "✓ holds" : v === "fails" ? "✗ fails" : "? error"}</span>}
+            </div>
+          );
+          if (s.error)
+            return (
+              <div key={s.requirement || s.name}>
+                {head}
+                <div className="error-box">{s.error}</div>
+              </div>
+            );
+          return (
+          <div key={s.requirement || s.name}>
+            {head}
             <MiniChart
               title={s.name}
               unit={s.unit}
@@ -301,7 +316,8 @@ function Scenarios({ o }: { o: ControlOutputs }) {
               {metric(s)} · tilt {fmt(s.maxTilt)}° · throttle {fmt(100 * s.maxThrottle)} %{s.saturation > 0 ? ` · at a limit ${fmt(s.saturation)} %` : ""}
             </div>
           </div>
-        ))}
+          );
+        })}
       </div>
       {o.issues.length > 0 && <div className="error-box">{o.issues.join("\n")}</div>}
     </>

@@ -120,10 +120,11 @@ CONTROL_UNITS = {
 @app.post("/control")
 def run_control(req: Req) -> dict[str, Any]:
     """Controllability: tune the flight controller from open-loop tests, or verify
-    the model's gains, and fly a manoeuvre per performed behavior. See ``control``."""
+    the model's gains, and fly the control tests given. See ``control``."""
     raw = {k: _v(v) for k, v in req.inputs.items()}
-    if isinstance(raw.get("behaviors"), list):
-        raw["behaviors"] = [{k: _v(v) for k, v in b.items()} for b in raw["behaviors"] if isinstance(b, dict)]
+    for key in ("behaviors", "tests"):  # entries may carry {"value", "unit"} objects too
+        if isinstance(raw.get(key), list):
+            raw[key] = [{k: _v(v) for k, v in b.items()} for b in raw[key] if isinstance(b, dict)]
     try:
         res = control.simulate(raw)
     except (dynamics.SimulationError, ValueError, ZeroDivisionError, np.linalg.LinAlgError) as exc:

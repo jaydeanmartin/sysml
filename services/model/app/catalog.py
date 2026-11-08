@@ -50,6 +50,10 @@ Nothing here is stored outside the models. The conventions are plain SysML v2:
   of flown steps (Configurator). A requirement def with ``in`` parameters that
   a system simulation verifies is a *system requirement*, the others mission
   requirements;
+* a requirement def tagged ``#ControlTest`` is a **control test**: its
+  attributes (``command``, ``step``, ``rate``, ``hold``) say what a system
+  simulation flies, its ``in`` parameters which of the test's results it is
+  checked with;
 * **simulation evidence** is a verification usage typed by a mission
   simulation and tagged ``#SimulationEvidence`` (metadata): its subject is the
   system instance, its metadata attributes point at a stored result (see
@@ -75,6 +79,7 @@ COMPONENT_TAG = "Component"
 ARCHITECTURE_TAG = "SystemArchitecture"
 EVIDENCE_TAG = "SimulationEvidence"
 SYSTEM_SIM_TAG = "SystemSimulation"
+TEST_TAG = "ControlTest"
 BEHAVIOR_TAG = "Behavior"
 MISSION_TAG = "Mission"
 
@@ -248,7 +253,12 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
         subject = next((c for c in idx.children.get(n["id"], []) if c["kind"] == "subject"), None)
         if subject and subject.get("typeId"):
             params = [c["name"] for c in idx.children.get(n["id"], []) if c["kind"] == "param" and c.get("direction") == "in"]
-            requirements.append({**located(n), "subject": subject["name"], "subjectTypeId": subject["typeId"], "params": params})
+            requirements.append({
+                **located(n), "subject": subject["name"], "subjectTypeId": subject["typeId"], "params": params,
+                # a control test (#ControlTest): its attributes say what the simulation flies
+                "isTest": idx.tagged(n["id"], TEST_TAG),
+                "attributes": {a["name"]: a["value"] for a, _ in idx.features(n["id"], ("attribute",)) if a.get("value")},
+            })
 
     # ---------------------------------------------------------- mission simulations: tool-bound defs with a subject
     simulations = []
@@ -372,7 +382,8 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
         slot_names = {s["name"] for s in arch["slots"]}
         behavior_names = {b["name"] for b in arch["behaviors"]}
         assignments: dict[str, str | None] = {}
-        performs: dict[str, str | None] = {b: None for b in behavior_names}
+        # in the architecture's order (a set's order changes from one process to the next)
+        performs: dict[str, str | None] = {b["name"]: None for b in arch["behaviors"]}
         for c in idx.children.get(n["id"], []):
             if c["kind"] == "perform" and c["name"] in behavior_names:
                 inst = inst_by_id.get(c.get("subsets") or "")
@@ -424,7 +435,7 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
     tags = {
         n["name"]: _qn(n)
         for n in graph["nodes"]
-        if n["kind"] == "metadata def" and n["name"] in (COMPONENT_TAG, ARCHITECTURE_TAG, BEHAVIOR_TAG, MISSION_TAG, EVIDENCE_TAG, SYSTEM_SIM_TAG)
+        if n["kind"] == "metadata def" and n["name"] in (COMPONENT_TAG, ARCHITECTURE_TAG, BEHAVIOR_TAG, MISSION_TAG, EVIDENCE_TAG, SYSTEM_SIM_TAG, TEST_TAG)
     }
     return {
         "components": components,

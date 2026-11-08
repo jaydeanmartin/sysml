@@ -312,7 +312,30 @@ rotor speed ─► ESC speed loop (PI, per motor), or throttle only ─► motor
   3. The attitude, heading, velocity and position loops each get a quarter of the bandwidth of the loop inside them. The vertical loop is gentler, to keep thrust headroom.
 
   The out parameters of `ControllerTuning` are named like the attributes of `FlightController`. **Save & assign** writes them to a FlightController instance and puts it in the system's `controller` slot. The gains are design data, so they live in the model; the time responses live in the results store.
-- **Verification** (`ControlSimulation`, a verification def) uses the gains of the system's controller. Starting from hover, it flies one manoeuvre per performed behavior, recognised by its parameters: `climbRate`, `descentRate` (climb and descent steps), `speed` (a speed step) and `yawRate` (a 90° turn). It always adds a hover hold in a `gustSpeed` gust. It verifies `ControlStabilityRequirement` (phase and gain margins), `ControlAuthorityRequirement` (thrust margin, yaw authority, saturation), `ManoeuvreResponseRequirement` (speed and turn settling, overshoot) and `GustRejectionRequirement`. In the demo, `regionalLiIon` fails control authority: its heavy pack leaves a thrust margin of 1.71 against the 1.8 required.
+- **Control tests are requirements.** Each manoeuvre is a requirement def tagged `#ControlTest`, in `DroneControl`. Its attributes say what to fly, and its `in` parameters which of the test's results it is checked with:
+
+  ```sysml
+  #ControlTest requirement def SpeedStepTest {
+      subject drone : DeliveryDrone;
+      attribute command : String = "speed";        // climbRate, speed, heading or gust
+      attribute step : Real = drone.cruise.speed;  // m/s, from the behavior the drone performs
+      attribute hold : Real = 9;                   // s
+      in settlingTime : Real;
+      in overshoot : Real;
+      in maxTilt : Real;
+      in saturation : Real;
+      require constraint { settlingTime <= 5 and overshoot <= 15 and maxTilt <= 35 and saturation <= 5 }
+  }
+  ```
+
+  Every test starts from a settled hover:
+  - `climbRate` steps the vertical speed (a negative step is a descent).
+  - `speed` steps the ground speed.
+  - `heading` turns by `step` degrees at `rate` deg/s, and settling counts from the end of the turn.
+  - `gust` steps the wind while holding position.
+
+  The results a test can be checked with are `riseTime`, `settlingTime`, `overshoot`, `maxTrackingError`, `maxDeviation`, `finalError`, `maxTilt` and `saturation`. The demo has five tests: `ClimbStepTest`, `DescentStepTest`, `SpeedStepTest`, `TurnTest` (90° at the drone's turn rate) and `GustTest` (5 m/s). Each takes its command from the drone's own behaviors, so heavyLift is tested at 2 m/s climb, 10 m/s cruise and 30°/s turns.
+- **Verification** (`ControlSimulation`, a verification def) uses the gains of the system's controller. Its objective lists what it verifies: `ControlStabilityRequirement` (phase and gain margins), `ControlAuthorityRequirement` (thrust margin, yaw authority, saturation) and every control test. The model service sends the simulator the tests that apply to the system, with each attribute evaluated for it. The simulator flies exactly those and returns each one's results under `testResults[requirement]`, and each test gets its own verdict. To add a test, define one and verify it in the objective; to change one, edit its attributes or its constraint. A test that cannot be flown (an unknown command, a command with no value) fails on its own, and a test that diverges fails. In the demo, `regionalLiIon` fails control authority: its heavy pack leaves a thrust margin of 1.71 against the 1.8 required.
 - **System simulations.** Both defs are tagged `#SystemSimulation`. They simulate a system on its own, from the Configurator, with the performed behaviors' parameters sent as `behaviors`, instead of flying missions. A requirement def that a system simulation verifies is a system requirement, not a mission requirement. Results go into the results store (mission `system`) and can be recorded as evidence.
 - **Not modelled:** sensors and state estimation (the controller sees the true state), blade flapping, ground effect, vortex ring state and battery sag. Propellers use their static coefficients. The tuned gains are a sound starting point for flight tests, not flight-ready values.
 

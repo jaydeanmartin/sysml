@@ -1568,7 +1568,7 @@ def _behavior_inputs(cat: dict[str, Any], cfg: dict[str, Any]) -> list[dict[str,
     boolean values (parameters set by its behavior instance, defaults of its type)."""
     insts = {i["qualifiedName"]: i for i in cat["instances"]}
     out = []
-    for slot, qn in cfg.get("behaviors", {}).items():
+    for slot, qn in sorted(cfg.get("behaviors", {}).items()):  # a stable order, for the input hash
         i = insts.get(qn or "")
         if not i:
             continue
@@ -1592,14 +1592,24 @@ def _run_system(
     sims = {x["qualifiedName"]: x for x in cat["simulations"]}
     cfgs = {c["qualifiedName"]: c for c in cat["configurations"]}
     reqs = {r["qualifiedName"]: r for r in cat["requirements"]}
+    archs = {a["id"]: a for a in cat["architectures"]}
+
+    def bind(expr: str, subject: str, cfg_qn: str) -> str:
+        return re.sub(rf"(?<![\w:.]){re.escape(subject)}\b", cfg_qn, expr)
+
     plans: dict[tuple[str, str], dict[str, Any]] = {}
     exprs: list[str] = []
     for cfg_qn, sim_q in plans_in:
         sim = sims[sim_q]
-        subject = re.compile(rf"(?<![\w:.]){re.escape(sim['subject'])}\b")
-        inputs = {i["name"]: subject.sub(cfg_qn, i["value"]) for i in sim["inputs"]}
+        inputs = {i["name"]: bind(i["value"], sim["subject"], cfg_qn) for i in sim["inputs"]}
         exprs += list(inputs.values())
-        plans[(cfg_qn, sim_q)] = {"sim": sim, "inputs": inputs}
+        # the control tests of the system's architecture: each attribute bound to the system
+        tests = {
+            rq: {k: bind(v, reqs[rq]["subject"], cfg_qn) for k, v in reqs[rq]["attributes"].items()}
+            for rq in archs[cfgs[cfg_qn]["architectureId"]]["systemRequirements"] if reqs[rq]["isTest"]
+        }
+        exprs += [e for t in tests.values() for e in t.values()]
+        plans[(cfg_qn, sim_q)] = {"sim": sim, "inputs": inputs, "tests": tests}
     got, errors = _evaluate(project_id, exprs)
     run_id = str(uuid.uuid4())
     with db.pool.connection() as c:
@@ -1614,7 +1624,14 @@ def _run_system(
         missing = [name for name, v in inputs.items() if _unset(v)]
         if missing:
             return (cfg_qn, sim_q), res | {"error": f"{short_name(cfg_qn)} gives no value for {', '.join(missing)}: is every slot they depend on filled?"}
-        sent = {**inputs, "behaviors": _behavior_inputs(cat, cfgs[cfg_qn])}
+        tests = [
+            {"requirement": rq, "name": short_name(rq), **{k: _value(got.get(e)) for k, e in attrs.items()}}
+            for rq, attrs in p["tests"].items()
+        ]
+        for t in tests:  # a SysML string evaluates with its quotes
+            if isinstance(t.get("command"), str):
+                t["command"] = t["command"].strip('"')
+        sent = {**inputs, "behaviors": _behavior_inputs(cat, cfgs[cfg_qn]), "tests": tests}
         res["_hash"] = _input_hash(sim["toolName"], res["toolVersion"], sent)
         res["_sent"] = sent
         stored = _stored_result(project_id, commit_id, SYSTEM_KEY, cfg_qn, sim_q, sim["toolName"], res["_hash"])
@@ -1638,7 +1655,9 @@ def _run_system(
             o = res.get("outputs") or {}
             for rq in sim["verifies"]:
                 params = reqs[rq]["params"] if rq in reqs else []
-                if not params or not set(params) <= set(sim["outputs"]):
+                is_test = rq in reqs and reqs[rq]["isTest"]
+                # a control test is checked with its own results, the others with the simulation's outputs
+                if not params or (not is_test and not set(params) <= set(sim["outputs"])):
                     continue
                 ver: dict[str, Any] = {"method": "simulation", "by": sim_q}
                 res["verification"][rq] = ver
@@ -1646,11 +1665,20 @@ def _run_system(
                     res["verdicts"][rq] = "error"
                     ver["note"] = res.get("error") or "no result"
                     continue
-                if o.get("completed") is False:
-                    res["verdicts"][rq] = "fails"
-                    ver["note"] = "the simulation did not complete"
-                    continue
-                vals = [o.get(x) for x in params]
+                if is_test:
+                    src = (o.get("testResults") or {}).get(rq)
+                    if src is None:
+                        failed = next((x for x in o.get("scenarios") or [] if x.get("requirement") == rq and x.get("error")), None)
+                        res["verdicts"][rq] = "fails" if failed and "diverged" in failed["error"] else "error"
+                        ver["note"] = failed["error"] if failed else "the test was not flown"
+                        continue
+                else:
+                    if o.get("completed") is False:
+                        res["verdicts"][rq] = "fails"
+                        ver["note"] = "a control test could not be completed"
+                        continue
+                    src = o
+                vals = [src.get(x) for x in params]
                 ver["values"] = dict(zip(params, vals))
                 if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in vals):
                     res["verdicts"][rq] = "error"

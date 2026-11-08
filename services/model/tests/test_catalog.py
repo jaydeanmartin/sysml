@@ -283,16 +283,29 @@ def test_system_simulations_and_their_requirements():
             node("B__Stable", "requirement def", "Stable", "B"),
             node("B__Stable__drone", "subject", "drone", "B__Stable", typeId="B__Drone"),
             node("B__Stable__margin", "param", "margin", "B__Stable", direction="in"),
+            node("B__ControlTest", "metadata def", "ControlTest", "B"),
+            node("B__Climb", "requirement def", "Climb", "B", metadata=["ControlTest"]),
+            node("B__Climb__drone", "subject", "drone", "B__Climb", typeId="B__Drone"),
+            node("B__Climb__command", "attribute", "command", "B__Climb", value='"climbRate"'),
+            node("B__Climb__step", "attribute", "step", "B__Climb", value="drone.takeoff.climbRate"),
+            node("B__Climb__settlingTime", "param", "settlingTime", "B__Climb", direction="in"),
         ],
-        "edges": MISSION_GRAPH["edges"] + [{"id": "v1", "kind": "verify", "source": "B__Ctl", "target": "B__Stable"}],
+        "edges": MISSION_GRAPH["edges"] + [
+            {"id": "v1", "kind": "verify", "source": "B__Ctl", "target": "B__Stable"},
+            {"id": "v2", "kind": "verify", "source": "B__Ctl", "target": "B__Climb"},
+        ],
     }
     cat = catalog.build(graph, {"Lib.sysml": {"id": "lib", "name": "Lib"}})
     sims = {s["name"]: s for s in cat["simulations"]}
+    # a control test: its attributes say what to fly
+    climb = next(r for r in cat["requirements"] if r["name"] == "Climb")
+    assert climb["isTest"] and climb["attributes"] == {"command": '"climbRate"', "step": "drone.takeoff.climbRate"}
+    assert not next(r for r in cat["requirements"] if r["name"] == "Stable")["isTest"]
     assert (sims["Ctl"]["scope"], sims["Ctl"]["kind"]) == ("system", "verification def")
     assert (sims["Tune"]["scope"], sims["Tune"]["kind"]) == ("system", "analysis def")
     [arch] = cat["architectures"]
     assert arch["systemSimulations"] == ["B::Ctl", "B::Tune"] and arch["simulations"] == []
     # a requirement a system simulation verifies is a system requirement, not a mission one
-    assert arch["systemRequirements"] == ["B::Stable"]
+    assert arch["systemRequirements"] == ["B::Stable", "B::Climb"]
     assert arch["missionRequirements"] == ["B::Energy"]
     assert cat["tags"]["SystemSimulation"] == "B::SystemSimulation"

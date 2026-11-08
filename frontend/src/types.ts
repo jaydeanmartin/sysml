@@ -304,6 +304,10 @@ export interface CatalogRequirement extends Located {
   subjectTypeId: string;
   /** names of its in parameters (mission requirements have some) */
   params: string[];
+  /** a control test (#ControlTest): its attributes say what the control simulation flies */
+  isTest?: boolean;
+  /** attribute -> value expression */
+  attributes?: Record<string, string>;
 }
 
 /** a #Mission action def; each attribute is a total over the steps */
@@ -639,12 +643,14 @@ export interface EvidenceRecord extends Located {
   latestResultId: string | null;
 }
 
-/** a scenario flown by the control simulation */
+/** a control test flown by the control simulation, as its requirement (#ControlTest) specifies it */
 export interface ControlScenario {
+  /** the test requirement */
+  requirement: string | null;
   name: string;
-  behavior: string;
-  parameter: string;
-  command: number;
+  /** climbRate, speed, heading or gust */
+  command: string;
+  step: number;
   quantity: string;
   unit: string;
   riseTime: number | null;
@@ -657,6 +663,8 @@ export interface ControlScenario {
   maxThrottle: number;
   saturation: number;
   series: { t: number; reference: number; actual: number; [k: string]: number }[];
+  /** why it could not be flown */
+  error?: string;
 }
 
 export interface LoopMargin {
@@ -691,6 +699,8 @@ export interface ControlOutputs {
   completed: boolean;
   issues: string[];
   scenarios: ControlScenario[];
+  /** each test's results, by test requirement */
+  testResults: Record<string, Record<string, number | null>>;
   [gain: string]: unknown;
 }
 

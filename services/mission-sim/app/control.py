@@ -51,12 +51,12 @@ Stability margins (phase and gain) of every loop are computed from the
 identified models and the gains in use.
 
 **Verification** (``mode = "verify"`` with the model's gains, or after tuning
-with the proposed ones): from hover, one manoeuvre per behavior the system
-performs, recognised by its parameters: ``climbRate`` (climb step),
-``descentRate`` (descent step), ``speed`` (speed step), ``yawRate`` (a 90° turn
-at that rate), and always a hover hold under a ``gustSpeed`` step of wind.
-Each reports rise and settling time, overshoot, tracking error, tilt and the
-share of time a rotor was at its limit.
+with the proposed ones): the control **tests** the model specifies, each a
+requirement tagged ``#ControlTest`` (see ``fly_test``): a climb-rate, speed or
+heading step, or a gust while holding position. Each reports rise and settling
+time, overshoot, tracking error, deviation, tilt and the share of time a rotor
+was at its limit, under ``testResults[requirement]`` for the requirement to be
+checked with.
 
 Not modelled: sensors and state estimation (the controller sees the true
 state), blade flapping, ground effect, vortex ring state, battery sag. The
@@ -100,7 +100,6 @@ class Vehicle:
     airDensity: float = 1.225
     maxTilt: float = 30.0        # deg
     maxYawRate: float = 90.0     # deg/s
-    gustSpeed: float = 5.0       # m/s, step of wind in the gust test
     timeStep: float = 0.002      # s
 
 
@@ -658,74 +657,103 @@ def _fly(pl: Plant, g: Gains, dt: float, duration: float, ref_at, wind_at=None) 
     return rec
 
 
-def manoeuvres(pl: Plant, g: Gains, behaviors: list[dict[str, Any]], dt: float) -> list[dict[str, Any]]:
+COMMANDS = {
+    "climbRate": ("climb rate", "m/s"),
+    "speed": ("ground speed", "m/s"),
+    "heading": ("heading", "deg"),
+    "gust": ("position error", "m"),
+}
+
+
+def _num_or(v: Any, default: float | None) -> float | None:
+    if isinstance(v, bool) or v is None:
+        return default
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return default
+    return x if math.isfinite(x) else default
+
+
+def fly_test(pl: Plant, g: Gains, test: dict[str, Any], dt: float) -> dict[str, Any]:
+    """Fly one control test from a settled hover (1 s), as its requirement specifies:
+
+    * ``climbRate``: a step of vertical speed to ``step`` m/s, held ``hold`` s, then 0;
+    * ``speed``: a step of ground speed to ``step`` m/s along the heading, held ``hold`` s;
+    * ``heading``: a turn of ``step`` degrees at ``rate`` deg/s (a step without a rate),
+      then held ``hold`` s; settling and overshoot count from the end of the turn;
+    * ``gust``: holding position, a step of ``step`` m/s of wind, held ``hold`` s.
+    """
     v = pl.v
-    out = []
-    seen: set[str] = set()
     t0 = 1.0
-    for b in behaviors:
-        name = str(b.get("behavior") or b.get("slot") or "behavior")
-        label = str(b.get("slot") or name)
-        for key in ("climbRate", "descentRate", "speed", "yawRate"):
-            val = b.get(key)
-            if not isinstance(val, (int, float)) or isinstance(val, bool) or val <= 0 or key in seen:
-                continue
-            seen.add(key)
-            if key in ("climbRate", "descentRate"):
-                target = val if key == "climbRate" else -val
-                rec = _fly(pl, g, dt, 7.0, lambda t, target=target: {"vz": target if t0 <= t < 5.0 else 0.0})
-                m = _step_metrics(rec["t"], rec["vz"], t0, target, t1=5.0)
-                series = _series(rec["t"], reference=np.where((rec["t"] >= t0) & (rec["t"] < 5.0), target, 0.0), actual=rec["vz"], throttle=rec["throttle"])
-                quantity, unit = "climb rate", "m/s"
-            elif key == "speed":
-                target = val
-                rec = _fly(pl, g, dt, 10.0, lambda t, target=target: {"velocity": (target if t >= t0 else 0.0, 0.0)})
-                m = _step_metrics(rec["t"], rec["speed"], t0, target)
-                series = _series(rec["t"], reference=np.where(rec["t"] >= t0, target, 0.0), actual=rec["speed"], tilt=rec["tilt"], throttle=rec["throttle"])
-                quantity, unit = "ground speed", "m/s"
-            else:
-                rate = math.radians(min(val, v.maxYawRate))
-                angle = math.pi / 2
-                t_end = t0 + angle / rate
+    cmd = str(test.get("command", "")).strip('"')
+    step = _num_or(test.get("step"), None)
+    hold = _num_or(test.get("hold"), 6.0) or 6.0
+    if cmd not in COMMANDS:
+        raise SimulationError(f"unknown command '{cmd}': {', '.join(COMMANDS)}")
+    if step is None:
+        raise SimulationError("the test has no step")
+    quantity, unit = COMMANDS[cmd]
+    out: dict[str, Any] = {}
+    if cmd == "climbRate":
+        t1 = t0 + hold
+        rec = _fly(pl, g, dt, t1 + 2.0, lambda t: {"vz": step if t0 <= t < t1 else 0.0})
+        out = _step_metrics(rec["t"], rec["vz"], t0, step, t1=t1)
+        series = _series(rec["t"], reference=np.where((rec["t"] >= t0) & (rec["t"] < t1), step, 0.0), actual=rec["vz"], throttle=rec["throttle"])
+        name = f"climb rate step to {step:g} m/s"
+    elif cmd == "speed":
+        rec = _fly(pl, g, dt, t0 + hold, lambda t: {"velocity": (step if t >= t0 else 0.0, 0.0)})
+        out = _step_metrics(rec["t"], rec["speed"], t0, step)
+        series = _series(rec["t"], reference=np.where(rec["t"] >= t0, step, 0.0), actual=rec["speed"], tilt=rec["tilt"], throttle=rec["throttle"])
+        name = f"speed step to {step:g} m/s"
+    elif cmd == "heading":
+        rate_deg = _num_or(test.get("rate"), None)
+        rate = math.radians(min(rate_deg, v.maxYawRate)) if rate_deg and rate_deg > 0 else None
+        angle = math.radians(step)
+        t_end = t0 + (abs(angle) / rate if rate else 0.0)
+        sign = 1.0 if angle >= 0 else -1.0
 
-                def ref_turn(t, rate=rate, t_end=t_end):
-                    if t < t0:
-                        return {"heading": 0.0}
-                    if t < t_end:
-                        return {"heading": rate * (t - t0), "yawRate": rate}
-                    return {"heading": angle}
+        def ref_turn(t: float) -> dict[str, Any]:
+            if t < t0:
+                return {"heading": 0.0}
+            if t < t_end:
+                return {"heading": sign * rate * (t - t0), "yawRate": sign * rate}
+            return {"heading": angle}
 
-                rec = _fly(pl, g, dt, t_end + 4.0, ref_turn)
-                m = _step_metrics(rec["t"], rec["heading"], t0, 90.0, band=2 / 90)
-                ref = np.clip((rec["t"] - t0) * math.degrees(rate), 0, 90)
-                m["maxTrackingError"] = float(np.max(np.abs(ref - rec["heading"])))
-                series = _series(rec["t"], reference=ref, actual=rec["heading"], yawRate=rec["yawRate"], throttle=rec["throttle"])
-                quantity, unit = "heading", "deg"
-            out.append({
-                "name": f"{label}: {quantity} step" if key != "yawRate" else f"{label}: 90° turn",
-                "behavior": name, "parameter": key, "command": val, "quantity": quantity, "unit": unit, **m,
-                "maxTilt": float(rec["tilt"].max()), "maxThrottle": float(rec["throttle"].max()),
-                "saturation": float(100 * rec["sat"].mean()), "series": series,
-            })
-    # always: hold position in a gust
-    gust = np.array([v.gustSpeed, 0.0, 0.0])
-    rec = _fly(pl, g, dt, 8.0, lambda t: {"position": (0.0, 0.0, 0.0)}, lambda t: gust if t >= t0 else np.zeros(3))
-    dev = np.hypot(np.hypot(rec["x"], rec["y"]), rec["z"])
-    out.append({
-        "name": f"hover: {v.gustSpeed:g} m/s gust", "behavior": "Hover", "parameter": "gustSpeed", "command": v.gustSpeed,
-        "quantity": "position error", "unit": "m", "riseTime": None, "settlingTime": None, "overshoot": None,
-        "finalError": float(dev[-1]), "maxDeviation": float(dev.max()),
-        "maxTilt": float(rec["tilt"].max()), "maxThrottle": float(rec["throttle"].max()),
-        "saturation": float(100 * rec["sat"].mean()),
-        "series": _series(rec["t"], reference=np.zeros_like(rec["t"]), actual=dev, tilt=rec["tilt"], throttle=rec["throttle"]),
-    })
-    return out
+        rec = _fly(pl, g, dt, t_end + hold, ref_turn)
+        ref = np.where(rec["t"] < t0, 0.0, np.where(rec["t"] < t_end, sign * math.degrees(rate or 0) * (rec["t"] - t0), step))
+        after = rec["t"] >= t_end
+        err = rec["heading"][after] - step
+        outside = np.where(np.abs(err) > 2.0)[0]
+        tt = rec["t"][after] - t_end
+        settle = 0.0 if not len(outside) else (float(tt[outside[-1] + 1]) if outside[-1] + 1 < len(tt) else None)
+        beyond = (rec["heading"][after] - step) * sign
+        out = {
+            "riseTime": None, "settlingTime": settle,
+            "overshoot": float(max(0.0, beyond.max()) / abs(step) * 100) if step else None,
+            "finalError": float(abs(err[-1])), "maxTrackingError": float(np.max(np.abs(ref - rec["heading"]))),
+        }
+        series = _series(rec["t"], reference=ref, actual=rec["heading"], yawRate=rec["yawRate"], throttle=rec["throttle"])
+        name = f"{step:g}° turn" + (f" at {math.degrees(rate):g}°/s" if rate else "")
+    else:  # gust
+        wind = np.array([step, 0.0, 0.0])
+        rec = _fly(pl, g, dt, t0 + hold, lambda t: {"position": (0.0, 0.0, 0.0)}, lambda t: wind if t >= t0 else np.zeros(3))
+        dev = np.hypot(np.hypot(rec["x"], rec["y"]), rec["z"])
+        out = {"riseTime": None, "settlingTime": None, "overshoot": None, "finalError": float(dev[-1]), "maxDeviation": float(dev.max())}
+        series = _series(rec["t"], reference=np.zeros_like(rec["t"]), actual=dev, tilt=rec["tilt"], throttle=rec["throttle"])
+        name = f"{step:g} m/s gust, holding position"
+    return {
+        "requirement": test.get("requirement"), "name": name, "command": cmd, "step": step, "quantity": quantity, "unit": unit,
+        **out, "maxTilt": float(rec["tilt"].max()), "maxThrottle": float(rec["throttle"].max()),
+        "saturation": float(100 * rec["sat"].mean()), "series": series,
+    }
 
 
 # ------------------------------------------------------------------ entry point
 def simulate(raw: dict[str, Any]) -> dict[str, Any]:
-    """``raw``: the vehicle inputs, ``behaviors`` (the performed behaviors with
-    their parameters), ``mode`` ("tune" or "verify") and, to verify, the gains."""
+    """``raw``: the vehicle inputs, ``tests`` (the control tests to fly, each with
+    its ``requirement``, ``command``, ``step``, ``rate`` and ``hold``), ``mode``
+    ("tune" or "verify") and, to verify, the gains."""
     mode = str(raw.get("mode", "verify")).strip('"')  # a SysML string evaluates with its quotes
     if mode not in ("tune", "verify"):
         raise SimulationError("mode is tune or verify")
@@ -743,34 +771,40 @@ def simulate(raw: dict[str, Any]) -> dict[str, Any]:
         rotor_lag = r["timeConstant"] / (1 + gains.rpmKp * r["gain"]) if gains.rpmLoop else r["timeConstant"]
         ident |= identify_body(pl, (gains.rpmKp, gains.rpmKi, gains.rpmLoop), dt, rotor_lag)
     margins = analyse(ident, gains, dt)
-    behaviors = raw.get("behaviors") or []
-    if not isinstance(behaviors, list):
-        raise SimulationError("behaviors must be a list")
+    tests = raw.get("tests") or []
+    if not isinstance(tests, list):
+        raise SimulationError("tests must be a list")
     issues: list[str] = []
-    try:
-        scen = manoeuvres(pl, gains, behaviors, dt)
-        completed = True
-    except SimulationError as exc:
-        scen, completed = [], False
-        issues.append(str(exc))
+    scen: list[dict[str, Any]] = []
+    completed = True
+    for test in tests:
+        label = str(test.get("name") or test.get("requirement") or "test")
+        try:
+            scen.append(fly_test(pl, gains, test, dt))
+        except SimulationError as exc:  # this test fails; the others still fly
+            completed = False
+            issues.append(f"{label}: {exc}")
+            scen.append({"requirement": test.get("requirement"), "name": label, "command": test.get("command"), "error": str(exc), "series": []})
+    flown = [x for x in scen if "error" not in x]
     pms = [m["phaseMargin"] for m in margins.values() if m["phaseMargin"] is not None]
     gms = [m["gainMargin"] for m in margins.values() if m["gainMargin"] is not None]
 
-    def worst(key: str, quantity: str) -> float | None:
-        vals = [s[key] for s in scen if s["quantity"] == quantity and s.get(key) is not None]
+    def worst(key: str, command: str) -> float | None:
+        vals = [x[key] for x in flown if x["command"] == command and x.get(key) is not None]
         return max(vals) if vals else None
 
     # yaw authority: the yaw acceleration available at hover against reaching the
-    # fastest commanded yaw rate in half a second
-    yaw_cmd = max([math.radians(min(b.get("yawRate"), v.maxYawRate)) for b in behaviors if isinstance(b.get("yawRate"), (int, float)) and not isinstance(b.get("yawRate"), bool)] or [math.radians(45)])
+    # fastest commanded turn rate in half a second (45°/s without a turn test)
+    rates = [_num_or(t.get("rate"), None) for t in tests if str(t.get("command", "")).strip('"') == "heading"]
+    yaw_cmd = math.radians(min(max([r for r in rates if r] or [45.0]), v.maxYawRate))
     yaw_acc = pl.max_yaw_torque(pl.T_hover) / pl.I[2]
-    saturation = max([s["saturation"] for s in scen] or [0.0])
-    gust = next((s for s in scen if s["parameter"] == "gustSpeed"), None)
-    for s in scen:
-        if s["saturation"] > 5:
-            issues.append(f"{s['name']}: a rotor at its limit {s['saturation']:.0f} % of the time")
-        if s.get("settlingTime") is None and s["quantity"] != "position error":
-            issues.append(f"{s['name']}: does not settle")
+    saturation = max([x["saturation"] for x in flown] or [0.0])
+    for x in flown:
+        if x["saturation"] > 5:
+            issues.append(f"{x['name']}: a rotor at its limit {x['saturation']:.0f} % of the time")
+        if x.get("settlingTime") is None and x["command"] != "gust":
+            issues.append(f"{x['name']}: does not settle")
+    metrics = ("riseTime", "settlingTime", "overshoot", "finalError", "maxDeviation", "maxTrackingError", "maxTilt", "maxThrottle", "saturation")
     result = {
         "mode": mode,
         "gains": {k: getattr(gains, k) for k in GAIN_NAMES} | {"rpmLoop": gains.rpmLoop},
@@ -791,14 +825,16 @@ def simulate(raw: dict[str, Any]) -> dict[str, Any]:
         "gainMargin": min(gms) if gms else None,
         "thrustMargin": pl.T_max / pl.T_hover,
         "yawAuthority": yaw_acc / (yaw_cmd / 0.5),
-        "climbSettlingTime": worst("settlingTime", "climb rate"),
-        "speedSettlingTime": worst("settlingTime", "ground speed"),
-        "speedOvershoot": worst("overshoot", "ground speed"),
+        "climbSettlingTime": worst("settlingTime", "climbRate"),
+        "speedSettlingTime": worst("settlingTime", "speed"),
+        "speedOvershoot": worst("overshoot", "speed"),
         "headingSettlingTime": worst("settlingTime", "heading"),
-        "gustDeviation": gust["maxDeviation"] if gust else None,
+        "gustDeviation": worst("maxDeviation", "gust"),
         "saturation": saturation,
         "completed": completed,
         "issues": issues,
+        # each test's results, by the requirement that specifies it: what the requirement is checked with
+        "testResults": {x["requirement"]: {k: x.get(k) for k in metrics} for x in flown if x.get("requirement")},
         "scenarios": scen,
     }
     return result
