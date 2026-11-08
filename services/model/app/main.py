@@ -304,6 +304,7 @@ DEMOS = [
             ("DroneLibrary", "drone_library.sysml", "Frames, batteries, motors, propellers and payload modules, with their catalog instances"),
             ("DroneArchitectures", "drone_architectures.sysml", "Quad, hexa and octo architectures, sizing requirements and configured drones"),
             ("DroneMissions", "drone_missions.sysml", "Behavior library and delivery missions built from ordered behaviors"),
+            ("DroneControl", "drone_control.sysml", "Controllability: flight-controller tuning and closed-loop manoeuvre simulation"),
         ],
     ),
 ]
@@ -1019,14 +1020,43 @@ class _Flights:
 
     def evaluate(self, project_id: uuid.UUID, exprs: list[str]) -> tuple[dict[str, str | None], list[str]]:
         """Evaluate expressions with the project's models and the scratch package."""
-        if not exprs:
-            return {}, []
-        rows = _project_heads(project_id)
-        files = [{"name": f"{r['name']}.sysml", "text": r["source"]} for r in rows]
-        files.append({"name": f"{self.SCRATCH}.sysml", "text": "\n".join([*self.lines, "}"]) + "\n"})
-        run = _interpreter("/execute", {"files": files, "kind": "evaluate", "expression": "\n".join(exprs), "trace": False})
-        got = {c["subject"]: (c["values"][0]["value"] if c["values"] else None) for c in run.get("checks") or []}
-        return got, run.get("errors") or []
+        return _evaluate(project_id, exprs, [{"name": f"{self.SCRATCH}.sysml", "text": "\n".join([*self.lines, "}"]) + "\n"}])
+
+
+def _evaluate(project_id: uuid.UUID, exprs: list[str], extra: list[dict[str, str]] | None = None) -> tuple[dict[str, str | None], list[str]]:
+    """Evaluate expressions in one run, with the project's models (head versions)
+    and ``extra`` files. Returns (expression -> value text, errors)."""
+    if not exprs:
+        return {}, []
+    rows = _project_heads(project_id)
+    files = [{"name": f"{r['name']}.sysml", "text": r["source"]} for r in rows] + (extra or [])
+    run = _interpreter("/execute", {"files": files, "kind": "evaluate", "expression": "\n".join(dict.fromkeys(exprs)), "trace": False})
+    got = {c["subject"]: (c["values"][0]["value"] if c["values"] else None) for c in run.get("checks") or []}
+    return got, run.get("errors") or []
+
+
+def _invoke_tool(sim: dict[str, Any], sent: dict[str, Any], run_id: str) -> dict[str, Any]:
+    """Call a simulation's external analysis through the analysis service (which
+    logs the call under ``run_id``): ``{"outputs", "units"}`` or ``{"error"}``."""
+    try:
+        r = httpx.post(
+            f"{ANALYSIS_URL}/analyses/{sim['toolName']}/invoke",
+            json={"toolName": sim["toolName"], "uri": f"analysis://{sim['toolName']}", "inputs": sent, "runId": run_id},
+            timeout=120,
+        )
+    except httpx.HTTPError as exc:
+        return {"error": f"analysis service unreachable: {exc}"}
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("detail")
+        except ValueError:
+            detail = r.text[:300]
+        return {"error": str(detail)}
+    outs = r.json().get("outputs") or {}
+    return {
+        "outputs": {k: (v.get("value") if isinstance(v, dict) else v) for k, v in outs.items()},
+        "units": {k: v["unit"] for k, v in outs.items() if isinstance(v, dict) and v.get("unit")},
+    }
 
 
 def _mission_checks(cat: dict[str, Any], arch: dict[str, Any], totals: list[str]) -> list[dict[str, Any]]:
@@ -1146,7 +1176,7 @@ def _run_missions(
         sim = p["sim"]
         inputs: dict[str, Any] = {name: _value(got.get(expr)) for name, expr in p["inputs"].items()}
         res: dict[str, Any] = {"simulation": sim["qualifiedName"], "toolName": sim["toolName"], "toolVersion": versions.get(sim["toolName"]), "inputs": inputs}
-        missing = [name for name, v in inputs.items() if v is None]
+        missing = [name for name, v in inputs.items() if _unset(v)]
         if missing:
             return k, res | {"error": f"could not evaluate {', '.join(missing)}"}
         steps = [
@@ -1168,25 +1198,7 @@ def _run_missions(
                 "outputs": stored["outputs"], "units": stored["units"],
                 "_stored": str(stored["id"]) if same else None, "_reused": str(stored["id"]),
             }
-        try:
-            r = httpx.post(
-                f"{ANALYSIS_URL}/analyses/{sim['toolName']}/invoke",
-                json={"toolName": sim["toolName"], "uri": f"analysis://{sim['toolName']}", "inputs": {**inputs, "steps": steps}, "runId": run_id},
-                timeout=60,
-            )
-        except httpx.HTTPError as exc:
-            return k, res | {"error": f"analysis service unreachable: {exc}"}
-        if r.status_code >= 400:
-            try:
-                detail = r.json().get("detail")
-            except ValueError:
-                detail = r.text[:300]
-            return k, res | {"error": str(detail)}
-        outs = r.json().get("outputs") or {}
-        return k, res | {
-            "outputs": {k: (v.get("value") if isinstance(v, dict) else v) for k, v in outs.items()},
-            "units": {k: v["unit"] for k, v in outs.items() if isinstance(v, dict) and v.get("unit")},
-        }
+        return k, res | _invoke_tool(sim, sent, run_id)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
         for (key, cfg_qn, sim_q), sres in pool.map(call, plans.items()):
@@ -1315,6 +1327,12 @@ class SimulateIn(BaseModel):
     mission: str | None = Field(None, description="qualified name of a saved mission; omit to simulate the draft")
     draft: list[StepIn] | None = None
     systems: list[str] | None = Field(None, description="system instances to simulate (default: every one a simulation applies to)")
+
+
+def _unset(v: Any) -> bool:
+    """An input that could not be evaluated: no value, or one the model leaves
+    undetermined (e.g. a slot with no component chosen)."""
+    return v is None or (isinstance(v, str) and "undetermined" in v)
 
 
 def _value(v: str | None) -> Any:
@@ -1501,16 +1519,20 @@ def record_evidence(result_id: uuid.UUID, body: EvidenceIn) -> dict[str, Any]:
         "verdicts": "; ".join(f"{short_name(q)} {v}" for q, v in verdicts.items()),
         "recordedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-    name = re.sub(r"\W", "_", f"{short_name(r['system'])}_{short_name(mission)}")
-    if len(cat["simulations"]) > 1:  # evidence of each simulation of the same flight
-        name += f"_{short_name(r['simulation'])}"
+    if mission == SYSTEM_KEY:  # a simulation of the system on its own
+        name = re.sub(r"\W", "_", f"{short_name(r['system'])}_{short_name(r['simulation'])}")
+    else:
+        name = re.sub(r"\W", "_", f"{short_name(r['system'])}_{short_name(mission)}")
+        if len(cat["simulations"]) > 1:  # evidence of each simulation of the same flight
+            name += f"_{short_name(r['simulation'])}"
     replace = next(
         (e for e in cat["evidence"] if e["values"].get("mission") == mission and e["system"] == r["system"] and e["simulation"] == r["simulation"]),
         None,
     )
     model_id, pkg_qn, apply = _place(cat, sources, name, pkg["qualifiedName"], replace)
     o = r["outputs"]
-    doc = f"{short_name(mission)} flown by {short_name(r['system'])}: {overall}"
+    doc = (f"{short_name(r['simulation'])} of {short_name(r['system'])}: {overall}" if mission == SYSTEM_KEY
+           else f"{short_name(mission)} flown by {short_name(r['system'])}: {overall}")
     if isinstance(o.get("energyPercent"), (int, float)):
         doc += f", {o['energyPercent']:.1f} % of the battery"
     if isinstance(o.get("missionTime"), (int, float)):
@@ -1535,6 +1557,202 @@ def record_evidence(result_id: uuid.UUID, body: EvidenceIn) -> dict[str, Any]:
             ).fetchone()
         tagged = tag_name if row else None
     return res | {"qualifiedName": f"{pkg_qn}::{name}", "text": "\n".join(block), "tag": tagged}
+
+
+# ------------------------------------------------------------------ simulations of a system on its own
+SYSTEM_KEY = "system"  # the results store's "mission" of a system simulation
+
+
+def _behavior_inputs(cat: dict[str, Any], cfg: dict[str, Any]) -> list[dict[str, Any]]:
+    """The behaviors a system instance performs, with each one's numeric and
+    boolean values (parameters set by its behavior instance, defaults of its type)."""
+    insts = {i["qualifiedName"]: i for i in cat["instances"]}
+    out = []
+    for slot, qn in cfg.get("behaviors", {}).items():
+        i = insts.get(qn or "")
+        if not i:
+            continue
+        vals = {k: _value(v) for k, v in i["values"].items()}
+        out.append({
+            "slot": slot, "behavior": short_name(i["component"]), "instance": i["name"],
+            **{k: v for k, v in vals.items() if isinstance(v, (int, float, bool))},
+        })
+    return out
+
+
+def _run_system(
+    project_id: uuid.UUID, cat: dict[str, Any], plans_in: list[tuple[str, str]],
+) -> tuple[dict[str, dict[str, Any]], list[str], str]:
+    """Run system simulations: ``plans_in`` lists (system instance, simulation
+    def). Each simulation's in parameters are evaluated with the system as
+    subject and sent with the system's performed ``behaviors``; a stored result
+    with the same inputs is reused. The requirements a simulation verifies are
+    then checked with its results, and every result is stored.
+    Returns ``(results[system][simulation], errors, run id)``."""
+    sims = {x["qualifiedName"]: x for x in cat["simulations"]}
+    cfgs = {c["qualifiedName"]: c for c in cat["configurations"]}
+    reqs = {r["qualifiedName"]: r for r in cat["requirements"]}
+    plans: dict[tuple[str, str], dict[str, Any]] = {}
+    exprs: list[str] = []
+    for cfg_qn, sim_q in plans_in:
+        sim = sims[sim_q]
+        subject = re.compile(rf"(?<![\w:.]){re.escape(sim['subject'])}\b")
+        inputs = {i["name"]: subject.sub(cfg_qn, i["value"]) for i in sim["inputs"]}
+        exprs += list(inputs.values())
+        plans[(cfg_qn, sim_q)] = {"sim": sim, "inputs": inputs}
+    got, errors = _evaluate(project_id, exprs)
+    run_id = str(uuid.uuid4())
+    with db.pool.connection() as c:
+        commit_id = repo.head(c, project_id)
+    versions = _tool_versions({p["sim"]["toolName"] for p in plans.values()})
+
+    def call(item: tuple[tuple[str, str], dict[str, Any]]) -> tuple[tuple[str, str], dict[str, Any]]:
+        (cfg_qn, sim_q), p = item
+        sim = p["sim"]
+        inputs = {name: _value(got.get(expr)) for name, expr in p["inputs"].items()}
+        res: dict[str, Any] = {"simulation": sim_q, "toolName": sim["toolName"], "toolVersion": versions.get(sim["toolName"]), "inputs": inputs}
+        missing = [name for name, v in inputs.items() if _unset(v)]
+        if missing:
+            return (cfg_qn, sim_q), res | {"error": f"{short_name(cfg_qn)} gives no value for {', '.join(missing)}: is every slot they depend on filled?"}
+        sent = {**inputs, "behaviors": _behavior_inputs(cat, cfgs[cfg_qn])}
+        res["_hash"] = _input_hash(sim["toolName"], res["toolVersion"], sent)
+        res["_sent"] = sent
+        stored = _stored_result(project_id, commit_id, SYSTEM_KEY, cfg_qn, sim_q, sim["toolName"], res["_hash"])
+        if stored:
+            same = stored["commit_id"] == commit_id and stored["mission"] == SYSTEM_KEY and stored["system"] == cfg_qn
+            return (cfg_qn, sim_q), res | {"outputs": stored["outputs"], "units": stored["units"],
+                                           "_stored": str(stored["id"]) if same else None, "_reused": str(stored["id"])}
+        return (cfg_qn, sim_q), res | _invoke_tool(sim, sent, run_id)
+
+    out: dict[str, dict[str, Any]] = {}
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        for (cfg_qn, sim_q), res in pool.map(call, plans.items()):
+            res["verdicts"], res["verification"] = {}, {}
+            out.setdefault(cfg_qn, {})[sim_q] = res
+
+    # the requirements each simulation verifies, with its results
+    pending: list[tuple[dict[str, Any], str, str]] = []
+    for cfg_qn, per_sim in out.items():
+        for sim_q, res in per_sim.items():
+            sim = sims[sim_q]
+            o = res.get("outputs") or {}
+            for rq in sim["verifies"]:
+                params = reqs[rq]["params"] if rq in reqs else []
+                if not params or not set(params) <= set(sim["outputs"]):
+                    continue
+                ver: dict[str, Any] = {"method": "simulation", "by": sim_q}
+                res["verification"][rq] = ver
+                if not o:
+                    res["verdicts"][rq] = "error"
+                    ver["note"] = res.get("error") or "no result"
+                    continue
+                if o.get("completed") is False:
+                    res["verdicts"][rq] = "fails"
+                    ver["note"] = "the simulation did not complete"
+                    continue
+                vals = [o.get(x) for x in params]
+                ver["values"] = dict(zip(params, vals))
+                if not all(isinstance(x, (int, float)) and not isinstance(x, bool) for x in vals):
+                    res["verdicts"][rq] = "error"
+                    ver["note"] = f"no value for {', '.join(x for x, v in zip(params, vals) if not isinstance(v, (int, float)))}"
+                    continue
+                expr = f"{rq}({', '.join([cfg_qn, *(_literal(x) for x in vals)])})"
+                pending.append((res, rq, expr))
+    if pending:
+        got2, errors2 = _evaluate(project_id, [e for _, _, e in pending])
+        errors += errors2
+        for res, rq, expr in pending:
+            v = got2.get(expr)
+            res["verdicts"][rq] = "holds" if v == "true" else "fails" if v == "false" else "error"
+
+    # into the results store
+    with db.pool.connection() as c, c.transaction():
+        for cfg_qn, per_sim in out.items():
+            for sim_q, res in per_sim.items():
+                if "_hash" not in res:
+                    continue
+                rid = res.pop("_stored", None)
+                if not rid:
+                    rid = str(uuid.uuid4())
+                    c.execute(
+                        """INSERT INTO models.simulation_result
+                           (id, run_id, project_id, commit_id, mission_type, mission, draft_steps, system, simulation,
+                            tool_name, tool_version, input_hash, inputs, outputs, units, verdicts, verification, error, reused_from)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                        (
+                            rid, run_id, project_id, commit_id, "", SYSTEM_KEY, None, cfg_qn, sim_q, res["toolName"], res["toolVersion"],
+                            res["_hash"], Jsonb(res["_sent"]), Jsonb(res.get("outputs")), Jsonb(res.get("units") or {}),
+                            Jsonb(res["verdicts"]), Jsonb(res["verification"]), res.get("error"), res.get("_reused"),
+                        ),
+                    )
+                res["resultId"] = rid
+                res["reused"] = bool(res.pop("_reused", None))
+                res["commitId"] = str(commit_id) if commit_id else None
+                res.pop("_hash"), res.pop("_sent")
+    return out, errors, run_id
+
+
+class SystemSimulateIn(BaseModel):
+    architecture: str | None = Field(None, description="simulate every system instance of this architecture")
+    systems: list[str] | None = Field(None, description="or these system instances")
+    simulation: str | None = Field(None, description="a system simulation def (default: every verification def that applies)")
+
+
+@app.post("/projects/{project_id}/catalog/configurations/simulate")
+def simulate_systems(project_id: uuid.UUID, body: SystemSimulateIn) -> dict[str, Any]:
+    """Run the system simulations (verification defs tagged #SystemSimulation)
+    of system instances and check the requirements they verify with their results."""
+    cat, _ = _project_catalog(project_id)
+    archs = {a["id"]: a for a in cat["architectures"]}
+    sims = {x["qualifiedName"]: x for x in cat["simulations"]}
+    cfgs = [c for c in cat["configurations"]
+            if (body.systems is None or c["qualifiedName"] in body.systems)
+            and (body.architecture is None or archs[c["architectureId"]]["qualifiedName"] == body.architecture)]
+    plans = []
+    for c in cfgs:
+        for q in archs[c["architectureId"]]["systemSimulations"]:
+            if (body.simulation and q == body.simulation) or (not body.simulation and sims[q]["kind"] == "verification def"):
+                plans.append((c["qualifiedName"], q))
+    out, errors, run_id = _run_system(project_id, cat, plans)
+    return {"runId": run_id, "systems": out, "errors": errors}
+
+
+class TuneIn(BaseModel):
+    system: str
+    simulation: str | None = Field(None, description="a system simulation def (default: the first analysis def that applies)")
+
+
+@app.post("/projects/{project_id}/catalog/configurations/tune")
+def tune_system(project_id: uuid.UUID, body: TuneIn) -> dict[str, Any]:
+    """Run a tuning analysis (an analysis def tagged #SystemSimulation) for one
+    system instance. Its out parameters are proposals for the attributes of the
+    component in one of the system's slots (the slot whose type has them all):
+    they are returned with that slot, its type and the instance it holds now."""
+    cat, _ = _project_catalog(project_id)
+    cfg = _find(cat["configurations"], body.system, "system instance")
+    arch = next(a for a in cat["architectures"] if a["id"] == cfg["architectureId"])
+    sims = {x["qualifiedName"]: x for x in cat["simulations"]}
+    cands = [q for q in arch["systemSimulations"] if (body.simulation == q) or (not body.simulation and sims[q]["kind"] == "analysis def")]
+    if not cands:
+        raise HTTPException(404, f"no tuning analysis applies to {arch['name']}")
+    sim = sims[cands[0]]
+    out, errors, run_id = _run_system(project_id, cat, [(cfg["qualifiedName"], sim["qualifiedName"])])
+    res = out[cfg["qualifiedName"]][sim["qualifiedName"]]
+    o = res.get("outputs") or {}
+    proposals = {k: o[k] for k in sim["outputs"] if isinstance(o.get(k), (int, float)) and not isinstance(o.get(k), bool)}
+    comps = {c["qualifiedName"]: c for c in cat["components"]}
+    slot = next(
+        (s for s in arch["slots"] if proposals and set(proposals) <= {a["name"] for a in comps.get(s["type"], {}).get("attributes", [])}),
+        None,
+    )
+    insts = {i["qualifiedName"]: i for i in cat["instances"]}
+    current = insts.get(cfg["assignments"].get(slot["name"]) or "") if slot else None
+    return {
+        "runId": run_id, "system": cfg["qualifiedName"], "simulation": sim["qualifiedName"], "result": res, "errors": errors,
+        "proposals": proposals,
+        "slot": slot["name"] if slot else None, "component": slot["type"] if slot else None,
+        "current": {"qualifiedName": current["qualifiedName"], "values": current["values"]} if current else None,
+    }
 
 
 @app.delete("/projects/{project_id}/catalog/elements")

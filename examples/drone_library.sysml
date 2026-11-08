@@ -10,6 +10,9 @@ package DroneLibrary {
     metadata def SystemArchitecture {
         doc /* A system-level part def. Its part usages are slots that component instances fill, its performed actions behavior slots that behavior instances fill. */
     }
+    metadata def SystemSimulation {
+        doc /* A simulation of a system instance on its own (not of a mission), run from the Configurator. */
+    }
     metadata def Behavior {
         doc /* An abstract behavior: its in parameters are set by the system that performs it, its quantities by each mission step. */
     }
@@ -94,6 +97,27 @@ package DroneLibrary {
     #Component part def Winch :> PayloadModule {
         doc /* Tether winch that lowers the parcel while the drone hovers. */
         attribute tetherLength : Real;      // m
+    }
+
+    #Component part def FlightController {
+        doc /* Cascaded flight-control loops and their gains: ESC speed (PI), body rates (PID roll and pitch, PI yaw), attitude and heading (P), velocity and vertical speed (PI), position (P). Tuned by the ControllerTuning analysis. */
+        attribute rpmKp : Real;                 // V per rad/s, ESC speed loop
+        attribute rpmKi : Real;                 // V per rad
+        attribute rateKp : Real;                // N·m per rad/s, roll and pitch rate
+        attribute rateKi : Real;                // N·m per rad
+        attribute rateKd : Real;                // N·m per rad/s²
+        attribute yawRateKp : Real;             // N·m per rad/s
+        attribute yawRateKi : Real;             // N·m per rad
+        attribute attitudeKp : Real;            // 1/s
+        attribute headingKp : Real;             // 1/s
+        attribute velocityKp : Real;            // 1/s
+        attribute velocityKi : Real;            // 1/s²
+        attribute verticalKp : Real;            // 1/s
+        attribute verticalKi : Real;            // 1/s²
+        attribute positionKp : Real;            // 1/s
+        attribute rpmLoop : Boolean default = true;     // the ESCs hold the commanded speed; false: throttle only
+        attribute maxTilt : Real default = 30;          // deg
+        attribute maxYawRate : Real default = 90;       // deg/s
     }
 
     // ---------------------------------------------------------- catalog
@@ -302,6 +326,108 @@ package DroneLibrary {
             attribute :>> capacity = 15 [SI::kg];
             attribute :>> tetherLength = 30;
         }
+        part fcCourier : FlightController {
+            doc /* Tuned for courier */
+            attribute :>> rpmKp = 0.02567;
+            attribute :>> rpmKi = 0.5436;
+            attribute :>> rateKp = 0.5261;
+            attribute :>> rateKi = 2.568;
+            attribute :>> rateKd = 0.003104;
+            attribute :>> yawRateKp = 0.5907;
+            attribute :>> yawRateKi = 2.884;
+            attribute :>> attitudeKp = 4.615;
+            attribute :>> headingKp = 4.615;
+            attribute :>> velocityKp = 1.538;
+            attribute :>> velocityKi = 0.5917;
+            attribute :>> verticalKp = 2.5;
+            attribute :>> verticalKi = 1.562;
+            attribute :>> positionKp = 0.3846;
+        }
+        part fcParcel : FlightController {
+            doc /* Tuned for parcel */
+            attribute :>> rpmKp = 0.05994;
+            attribute :>> rpmKi = 0.9362;
+            attribute :>> rateKp = 1.195;
+            attribute :>> rateKi = 4.391;
+            attribute :>> rateKd = 0.009561;
+            attribute :>> yawRateKp = 1.858;
+            attribute :>> yawRateKi = 6.829;
+            attribute :>> attitudeKp = 3.443;
+            attribute :>> headingKp = 3.464;
+            attribute :>> velocityKp = 1.148;
+            attribute :>> velocityKi = 0.3293;
+            attribute :>> verticalKp = 2.5;
+            attribute :>> verticalKi = 1.562;
+            attribute :>> positionKp = 0.2869;
+        }
+        part fcParcelLongRange : FlightController {
+            doc /* Tuned for parcelLongRange */
+            attribute :>> rpmKp = 0.06108;
+            attribute :>> rpmKi = 0.8966;
+            attribute :>> rateKp = 1.162;
+            attribute :>> rateKi = 4.028;
+            attribute :>> rateKd = 0.009897;
+            attribute :>> yawRateKp = 1.764;
+            attribute :>> yawRateKi = 6.113;
+            attribute :>> attitudeKp = 3.249;
+            attribute :>> headingKp = 3.269;
+            attribute :>> velocityKp = 1.083;
+            attribute :>> velocityKi = 0.2932;
+            attribute :>> verticalKp = 2.5;
+            attribute :>> verticalKi = 1.562;
+            attribute :>> positionKp = 0.2707;
+        }
+        part fcRegional : FlightController {
+            doc /* Tuned for regional */
+            attribute :>> rpmKp = 0.1199;
+            attribute :>> rpmKi = 2.349;
+            attribute :>> rateKp = 12.8;
+            attribute :>> rateKi = 58.14;
+            attribute :>> rateKd = 0.0817;
+            attribute :>> yawRateKp = 23.84;
+            attribute :>> yawRateKi = 108.3;
+            attribute :>> attitudeKp = 4.276;
+            attribute :>> headingKp = 4.289;
+            attribute :>> velocityKp = 1.425;
+            attribute :>> velocityKi = 0.5079;
+            attribute :>> verticalKp = 2.5;
+            attribute :>> verticalKi = 1.562;
+            attribute :>> positionKp = 0.3563;
+        }
+        part fcRegionalLiIon : FlightController {
+            doc /* Tuned for regionalLiIon */
+            attribute :>> rpmKp = 0.12;
+            attribute :>> rpmKi = 2.351;
+            attribute :>> rateKp = 12.87;
+            attribute :>> rateKi = 58.47;
+            attribute :>> rateKd = 0.08209;
+            attribute :>> yawRateKp = 23.85;
+            attribute :>> yawRateKi = 108.4;
+            attribute :>> attitudeKp = 4.276;
+            attribute :>> headingKp = 4.302;
+            attribute :>> velocityKp = 1.425;
+            attribute :>> velocityKi = 0.5079;
+            attribute :>> verticalKp = 2.5;
+            attribute :>> verticalKi = 1.562;
+            attribute :>> positionKp = 0.3563;
+        }
+        part fcHeavyLift : FlightController {
+            doc /* Tuned for heavyLift */
+            attribute :>> rpmKp = 0.123;
+            attribute :>> rpmKi = 2.394;
+            attribute :>> rateKp = 31.98;
+            attribute :>> rateKi = 144.4;
+            attribute :>> rateKd = 0.2053;
+            attribute :>> yawRateKp = 60.85;
+            attribute :>> yawRateKi = 274.8;
+            attribute :>> attitudeKp = 4.25;
+            attribute :>> headingKp = 4.263;
+            attribute :>> velocityKp = 1.417;
+            attribute :>> velocityKi = 0.5018;
+            attribute :>> verticalKp = 2.5;
+            attribute :>> verticalKi = 1.562;
+            attribute :>> positionKp = 0.3542;
+        }
     }
 
     // ---------------------------------------------------------- behaviors
@@ -359,6 +485,13 @@ package DroneLibrary {
         attribute :>> duration = altitude / descentRate;
         attribute :>> verticalSpeed = -descentRate;
     }
+    abstract #Behavior action def Turn :> DroneBehavior {
+        doc /* Turn on the spot to a new heading. */
+        in :>> powerFactor;
+        in yawRate : Real;                      // deg/s
+        attribute angle : Real;                 // deg
+        attribute :>> duration = angle / yawRate;
+    }
     abstract #Behavior action def GroundRelease :> DroneBehavior {
         doc /* Release the parcel on the ground with the motors idle. */
         in :>> powerFactor;
@@ -387,5 +520,11 @@ package DroneLibrary {
         action landStandard : Land { in :>> powerFactor = 0.8; in :>> descentRate = 2; }
         action landGentle : Land { in :>> powerFactor = 0.85; in :>> descentRate = 1.5; }
         action releaseIdle : GroundRelease { in :>> powerFactor = 0.05; }
+        action turnStandard : Turn { in :>> powerFactor = 1.0; in :>> yawRate = 45; }
+        action turnGentle : Turn {
+            doc /* Slow turns for heavy lifters */
+            in :>> powerFactor = 1.0;
+            in :>> yawRate = 30;
+        }
     }
 }

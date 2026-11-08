@@ -137,6 +137,7 @@ package DroneMissions {
             then action cruise : Cruise { attribute :>> distance = 2000; }
             then action land : Land { attribute :>> altitude = 30; }
             then action groundRelease : GroundRelease { attribute :>> duration = 30; }
+            then action turn : Turn { attribute :>> angle = 180; }
             then action takeoff_2 : Takeoff { attribute :>> altitude = 30; }
             then action cruise_2 : Cruise { attribute :>> distance = 2000; }
             then action land_2 : Land { attribute :>> altitude = 30; }
@@ -150,6 +151,7 @@ package DroneMissions {
             then action hover : Hover { attribute :>> duration = 30; }
             then action land : Land { attribute :>> altitude = 60; }
             then action groundRelease : GroundRelease { attribute :>> duration = 30; }
+            then action turn : Turn { attribute :>> angle = 180; }
             then action takeoff_2 : Takeoff { attribute :>> altitude = 60; }
             then action cruise_2 : Cruise { attribute :>> distance = 5000; }
             then action land_2 : Land { attribute :>> altitude = 60; }
@@ -161,6 +163,7 @@ package DroneMissions {
             then action takeoff : Takeoff { attribute :>> altitude = 60; }
             then action cruise : Cruise { attribute :>> distance = 4000; }
             then action winchLower : WinchLower { attribute :>> depth = 20; }
+            then action turn : Turn { attribute :>> angle = 180; }
             then action cruise_2 : Cruise { attribute :>> distance = 4000; }
             then action land : Land { attribute :>> altitude = 60; }
             then done;
@@ -172,6 +175,7 @@ package DroneMissions {
             then action cruise : Cruise { attribute :>> distance = 8000; }
             then action land : Land { attribute :>> altitude = 60; }
             then action groundRelease : GroundRelease { attribute :>> duration = 30; }
+            then action turn : Turn { attribute :>> angle = 180; }
             then action takeoff_2 : Takeoff { attribute :>> altitude = 60; }
             then action cruise_2 : Cruise { attribute :>> distance = 8000; }
             then action land_2 : Land { attribute :>> altitude = 60; }

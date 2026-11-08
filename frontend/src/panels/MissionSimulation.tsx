@@ -2,12 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { isDynamics, type DynamicsOutputs, type MissionSimulationDef, type SimulationOutputs, type SimulationResult, type SimulationRun, type StepRequest, type SystemConfiguration } from "../types";
 import { errorText, short } from "./catalogUtil";
+import { useTheme } from "../theme";
 import { DynamicsDetails } from "./DynamicsResults";
 
 /** Categorical slots in fixed order (validated: adjacent CVD ΔE ≥ 9.1 on white).
  *  Three sit below 3:1 contrast, so identity is also carried by the legend,
  *  the table and the tooltip. A system keeps its slot whatever is shown. */
 export const SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"];
+/** The same hues stepped for the dark surface (validated on #171d26: adjacent CVD ΔE >= 8.4, all >= 3:1). */
+export const SERIES_DARK = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"];
 
 const W = 720;
 const H = 260;
@@ -42,7 +45,8 @@ export function MissionSimulation({ projectId, missionType, mission, draft, labe
   const [error, setError] = useState<string | null>(null);
   const [focus, setFocus] = useState<string | null>(null);
   const key = `${simDef?.qualifiedName}|${mission || `draft:${JSON.stringify(draft)}`}`;
-  const color = (qn: string) => SERIES[Math.max(0, systems.findIndex((s) => s.qualifiedName === qn)) % SERIES.length];
+  const series = useTheme().theme === "dark" ? SERIES_DARK : SERIES;
+  const color = (qn: string) => series[Math.max(0, systems.findIndex((s) => s.qualifiedName === qn)) % series.length];
 
   const run = async () => {
     if (!(await ensureSaved())) return;

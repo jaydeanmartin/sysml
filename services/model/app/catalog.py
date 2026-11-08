@@ -45,6 +45,11 @@ Nothing here is stored outside the models. The conventions are plain SysML v2:
 * a **mission requirement** is a requirement def with ``in`` parameters: it is
   checked with a system instance as subject and the totals of the mission as
   flown by that system as arguments;
+* a simulation tagged ``#SystemSimulation`` is of a **system instance on its
+  own**, not of a mission: the performed behaviors' parameters are sent instead
+  of flown steps (Configurator). A requirement def with ``in`` parameters that
+  a system simulation verifies is a *system requirement*, the others mission
+  requirements;
 * **simulation evidence** is a verification usage typed by a mission
   simulation and tagged ``#SimulationEvidence`` (metadata): its subject is the
   system instance, its metadata attributes point at a stored result (see
@@ -69,6 +74,7 @@ from typing import Any
 COMPONENT_TAG = "Component"
 ARCHITECTURE_TAG = "SystemArchitecture"
 EVIDENCE_TAG = "SimulationEvidence"
+SYSTEM_SIM_TAG = "SystemSimulation"
 BEHAVIOR_TAG = "Behavior"
 MISSION_TAG = "Mission"
 
@@ -262,11 +268,13 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
         simulations.append(
             {
                 **located(n), "toolName": n["tool"]["toolName"], "subject": subject["name"], "subjectTypeId": subject["typeId"],
-                "inputs": inputs, "outputs": outputs, "verifies": verifies,
+                "inputs": inputs, "outputs": outputs, "verifies": verifies, "kind": n["kind"],
+                "scope": "system" if SYSTEM_SIM_TAG in (n.get("metadata") or []) else "mission",
             }
         )
     for r in requirements:
         r["verifiedBy"] = [s["qualifiedName"] for s in simulations if r["qualifiedName"] in s["verifies"]]
+    system_verified = {q for s in simulations if s["scope"] == "system" for q in s["verifies"]}
 
     # ---------------------------------------------------------- simulation evidence
     sim_ids = {s["id"] for s in simulations}
@@ -338,12 +346,19 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
                 "requirements": [
                     r["qualifiedName"] for r in requirements if r["subjectTypeId"] in idx.ancestors(n["id"]) and not r["params"]
                 ],
-                # ... and those that also take mission totals: Req(system, total, ...)
+                # ... those that take mission results: Req(system, total or simulation result, ...)
                 "missionRequirements": [
-                    r["qualifiedName"] for r in requirements if r["subjectTypeId"] in idx.ancestors(n["id"]) and r["params"]
+                    r["qualifiedName"] for r in requirements
+                    if r["subjectTypeId"] in idx.ancestors(n["id"]) and r["params"] and r["qualifiedName"] not in system_verified
                 ],
-                # mission simulations this architecture can be the subject of
-                "simulations": [s["qualifiedName"] for s in simulations if s["subjectTypeId"] in idx.ancestors(n["id"])],
+                # ... and those a system simulation verifies: Req(system, result, ...)
+                "systemRequirements": [
+                    r["qualifiedName"] for r in requirements
+                    if r["subjectTypeId"] in idx.ancestors(n["id"]) and r["params"] and r["qualifiedName"] in system_verified
+                ],
+                # simulations this architecture can be the subject of: of missions, and of the system on its own
+                "simulations": [s["qualifiedName"] for s in simulations if s["subjectTypeId"] in idx.ancestors(n["id"]) and s["scope"] == "mission"],
+                "systemSimulations": [s["qualifiedName"] for s in simulations if s["subjectTypeId"] in idx.ancestors(n["id"]) and s["scope"] == "system"],
             }
         )
     arch_by_id = {a["id"]: a for a in architectures}
@@ -409,7 +424,7 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
     tags = {
         n["name"]: _qn(n)
         for n in graph["nodes"]
-        if n["kind"] == "metadata def" and n["name"] in (COMPONENT_TAG, ARCHITECTURE_TAG, BEHAVIOR_TAG, MISSION_TAG, EVIDENCE_TAG)
+        if n["kind"] == "metadata def" and n["name"] in (COMPONENT_TAG, ARCHITECTURE_TAG, BEHAVIOR_TAG, MISSION_TAG, EVIDENCE_TAG, SYSTEM_SIM_TAG)
     }
     return {
         "components": components,

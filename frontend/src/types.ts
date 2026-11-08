@@ -291,6 +291,10 @@ export interface Architecture extends Located {
   requirements: string[];
   /** ... that also take mission totals as in parameters */
   missionRequirements: string[];
+  /** requirement defs (with in parameters) that a system simulation verifies */
+  systemRequirements: string[];
+  /** simulations of the system on its own (#SystemSimulation): verification and tuning */
+  systemSimulations: string[];
   /** mission simulations this architecture can be the subject of */
   simulations: string[];
 }
@@ -583,6 +587,10 @@ export interface SimulationRequest {
 }
 
 export interface MissionSimulationDef extends Located {
+  /** mission: flies missions' steps; system: the system on its own (#SystemSimulation) */
+  scope: "mission" | "system";
+  /** verification def (verifies requirements) or analysis def (e.g. tuning) */
+  kind: string;
   toolName: string;
   subject: string;
   subjectTypeId: string;
@@ -629,4 +637,95 @@ export interface EvidenceRecord extends Located {
   status: "current" | "outdated" | "missing";
   result: StoredResult | null;
   latestResultId: string | null;
+}
+
+/** a scenario flown by the control simulation */
+export interface ControlScenario {
+  name: string;
+  behavior: string;
+  parameter: string;
+  command: number;
+  quantity: string;
+  unit: string;
+  riseTime: number | null;
+  settlingTime: number | null;
+  overshoot: number | null;
+  finalError: number;
+  maxDeviation?: number;
+  maxTrackingError?: number;
+  maxTilt: number;
+  maxThrottle: number;
+  saturation: number;
+  series: { t: number; reference: number; actual: number; [k: string]: number }[];
+}
+
+export interface LoopMargin {
+  phaseMargin: number | null;
+  gainMargin: number | null;
+  crossover: number | null;
+}
+
+/** what the control simulator (controlSimulator) returns */
+export interface ControlOutputs {
+  mode: "tune" | "verify";
+  gains: Record<string, number | boolean>;
+  mixer: { rotors: { index: number; angle: number; x: number; y: number; spin: "cw" | "ccw" }[]; allocation: number[][]; mixer: number[][]; yawPerThrust: number };
+  hover: { thrustPerRotor: number; maxThrustPerRotor: number; rpm: number; maxRpm: number; throttle: number };
+  identification: {
+    rotor: { gain: number; timeConstant: number; step: number; hoverRpm: number; test: { t: number; measured: number; model: number }[] };
+    roll: { b: number; inertiaEstimate: number | null; lag: number; torque: number; test: { t: number; measured: number; model: number }[] };
+    pitch: { b: number; inertiaEstimate: number | null; lag: number; torque: number; test: { t: number; measured: number; model: number }[] };
+    yaw: { b: number; inertiaEstimate: number | null; lag: number; torque: number; test: { t: number; measured: number; model: number }[] };
+  };
+  margins: Record<string, LoopMargin>;
+  phaseMargin: number | null;
+  gainMargin: number | null;
+  thrustMargin: number;
+  yawAuthority: number;
+  saturation: number;
+  climbSettlingTime: number | null;
+  speedSettlingTime: number | null;
+  speedOvershoot: number | null;
+  headingSettlingTime: number | null;
+  gustDeviation: number | null;
+  completed: boolean;
+  issues: string[];
+  scenarios: ControlScenario[];
+  [gain: string]: unknown;
+}
+
+/** one system simulation of one system instance */
+export interface SystemRun {
+  simulation: string;
+  toolName: string;
+  toolVersion: string | null;
+  inputs: Record<string, unknown>;
+  outputs?: ControlOutputs;
+  units?: Record<string, string>;
+  error?: string;
+  verdicts: Record<string, "holds" | "fails" | "error">;
+  verification: Record<string, Verification>;
+  resultId?: string;
+  reused?: boolean;
+  commitId?: string | null;
+}
+
+export interface SystemSimulationResult {
+  runId: string;
+  /** system instance -> simulation def -> run */
+  systems: Record<string, Record<string, SystemRun>>;
+  errors: string[];
+}
+
+export interface TuneResult {
+  runId: string;
+  system: string;
+  simulation: string;
+  result: SystemRun;
+  errors: string[];
+  /** the analysis' out parameters: proposals for the attributes of the component in ``slot`` */
+  proposals: Record<string, number>;
+  slot: string | null;
+  component: string | null;
+  current: { qualifiedName: string; values: Record<string, string> } | null;
 }

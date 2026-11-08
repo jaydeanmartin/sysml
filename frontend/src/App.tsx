@@ -20,6 +20,7 @@ import { MissionsPanel } from "./panels/MissionsPanel";
 import { GeometryPanel } from "./panels/GeometryPanel";
 import { RequirementsPanel } from "./panels/RequirementsPanel";
 import { SNIPPETS } from "./snippets";
+import { useTheme, type ThemePref } from "./theme";
 import type { Catalog, CatalogChange, Diagnostic, GNode, Graph, Loc, Located, Model, ModelSummary, ModelTemplate, Project, Run, RunRequest } from "./types";
 
 type Tab = "diagram" | "library" | "configurator" | "missions" | "geometry" | "requirements" | "execute" | "analyses" | "history";
@@ -505,6 +506,7 @@ export default function App() {
           </button>
         </label>
         <div className="grow" />
+        <ThemeSwitch />
         <div className={`status ${errors.length ? "bad" : "ok"}`}>
           {parsing ? "Interpreting…" : errors.length ? `✗ ${errors.length} error${errors.length > 1 ? "s" : ""}` : "✓ Valid SysML v2"}
         </div>
@@ -713,6 +715,33 @@ export default function App() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+const THEMES: [ThemePref, string, string][] = [
+  ["light", "☀", "Light"],
+  ["system", "◐", "Follow the system setting"],
+  ["dark", "☾", "Dark"],
+];
+
+/** Light, dark, or whatever the operating system prefers. */
+function ThemeSwitch() {
+  const { pref, theme, setPref } = useTheme();
+  return (
+    <div className="seg small-seg theme-switch" role="radiogroup" aria-label="Colour theme">
+      {THEMES.map(([p, icon, label]) => (
+        <button
+          key={p}
+          role="radio"
+          aria-checked={pref === p}
+          className={pref === p ? "on" : ""}
+          title={p === "system" ? `${label} (now ${theme})` : label}
+          onClick={() => setPref(p)}
+        >
+          {icon}
+        </button>
+      ))}
     </div>
   );
 }

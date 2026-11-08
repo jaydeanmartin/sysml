@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import type { Architecture, CatalogChange, ComponentInstance, SystemConfiguration } from "../types";
+import { ControlPanel } from "./ControlPanel";
 import { NAME_RE, errorText, partText, ref, short, type CatalogPanelProps } from "./catalogUtil";
 
 interface Draft {
@@ -476,6 +477,16 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
             )}
             {!evaluation && configs.length > 0 && <div className="hint">Evaluate to compute {arch.attributes.map((a) => a.name).join(", ") || "the attributes"}{arch.requirements.length ? " and check the requirements" : ""} for every system instance.</div>}
             {evaluation && evaluation.errors.length > 0 && <div className="error-box">{evaluation.errors.join("\n")}</div>}
+            <ControlPanel
+              projectId={projectId}
+              catalog={catalog}
+              arch={arch}
+              selected={selQn}
+              onSelect={setSelQn}
+              ensureSaved={ensureSaved}
+              onChange={onChange}
+              onOpen={onOpen}
+            />
           </div>
         )}
       </div>

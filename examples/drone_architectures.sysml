@@ -16,6 +16,7 @@ package DroneArchitectures {
         part motors : Motor[1..*];
         part propellers : Propeller[1..*];
         part payload : PayloadModule;
+        part controller : FlightController;
         connect battery.powerOut to motors.powerIn;
         connect motors.shaft to propellers.hub;
         connect airframe.payloadMount to payload.mount;
@@ -26,6 +27,7 @@ package DroneArchitectures {
         perform action hover : Hover;
         perform action land : Land;
         perform action release : GroundRelease;
+        perform action turn : Turn;
 
         // sin(pi / rotors): the gap between adjacent motors is wheelbase * spacing
         attribute spacing : Real;
@@ -41,6 +43,22 @@ package DroneArchitectures {
         attribute hoverPower : Real = takeoffMass / (1 [SI::kg]) * 9.81 / (propellers.thrustPerWatt#(1) * motors.efficiency#(1));   // W
         attribute endurance : Real = battery.energy * 0.8 * 60 / hoverPower;   // min of hover, 20 % reserve
         attribute peakPower : Real = rotorCount * motors.maxPower#(1);        // W
+        // rigid-body inertia for the control simulation (closed form, X layout):
+        // rotors and arms on a circle of armLength, the hub a disc, battery and
+        // parcel point masses 5 and 10 cm off the rotor plane; rotor inertia from a
+        // propeller (a rod) and the motor bell (35 % of its mass on a radius
+        // 1.5 mm per inch of the largest propeller it takes)
+        attribute armLength : Real = airframe.wheelbase / 2000;     // m
+        attribute rotorMass : Real = (motors.mass#(1) + propellers.mass#(1)) / (1 [SI::kg]);
+        attribute hubRadius : Real = 0.16 * airframe.wheelbase / 1000;
+        attribute inertiaZZ : Real = rotorCount * rotorMass * armLength * armLength
+            + rotorCount * airframe.armMass / (1 [SI::kg]) * armLength * armLength / 3
+            + airframe.hubMass / (1 [SI::kg]) * hubRadius * hubRadius / 2;     // kg·m², yaw
+        attribute inertiaXX : Real = inertiaZZ / 2 + battery.mass / (1 [SI::kg]) * 0.0025
+            + (payload.mass + payload.capacity) / (1 [SI::kg]) * 0.01;            // kg·m², roll and pitch
+        attribute rotorInertia : Real = propellers.mass#(1) / (1 [SI::kg]) * (propellers.diameter#(1) * 0.0254) * (propellers.diameter#(1) * 0.0254) / 12
+            + 0.35 * motors.mass#(1) / (1 [SI::kg]) * (0.0015 * motors.maxPropDiameter#(1)) * (0.0015 * motors.maxPropDiameter#(1));   // kg·m²
+        attribute firstRotorSpin : Integer = 1;    // rotor 1 counter-clockwise seen from above; the others alternate
         attribute propClearance : Real = airframe.wheelbase * spacing - propellers.diameter#(1) * 25.4;   // mm between tips
     }
 
@@ -107,11 +125,13 @@ package DroneArchitectures {
             part :>> motors :> DroneLibrary::Catalog::m2814;
             part :>> propellers :> DroneLibrary::Catalog::prop10x4_5;
             part :>> payload :> DroneLibrary::Catalog::box1kg;
+            part :>> controller :> DroneLibrary::Catalog::fcCourier;
             perform action :>> takeoff :> DroneLibrary::Behaviors::takeoffStandard;
             perform action :>> cruise :> DroneLibrary::Behaviors::cruise15;
             perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
             perform action :>> land :> DroneLibrary::Behaviors::landStandard;
             perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
+            perform action :>> turn :> DroneLibrary::Behaviors::turnStandard;
         }
         part parcel : Quadcopter {
             doc /* Standard 2 kg parcel delivery */
@@ -120,11 +140,13 @@ package DroneArchitectures {
             part :>> motors :> DroneLibrary::Catalog::m4114;
             part :>> propellers :> DroneLibrary::Catalog::prop15x5;
             part :>> payload :> DroneLibrary::Catalog::box2kg;
+            part :>> controller :> DroneLibrary::Catalog::fcParcel;
             perform action :>> takeoff :> DroneLibrary::Behaviors::takeoffStandard;
             perform action :>> cruise :> DroneLibrary::Behaviors::cruise12;
             perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
             perform action :>> land :> DroneLibrary::Behaviors::landStandard;
             perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
+            perform action :>> turn :> DroneLibrary::Behaviors::turnStandard;
         }
         part parcelLongRange : Quadcopter {
             doc /* The parcel drone with the big battery: flies longer, but too heavy for its motors */
@@ -133,11 +155,13 @@ package DroneArchitectures {
             part :>> motors :> DroneLibrary::Catalog::m4114;
             part :>> propellers :> DroneLibrary::Catalog::prop15x5;
             part :>> payload :> DroneLibrary::Catalog::box2kg;
+            part :>> controller :> DroneLibrary::Catalog::fcParcelLongRange;
             perform action :>> takeoff :> DroneLibrary::Behaviors::takeoffStandard;
             perform action :>> cruise :> DroneLibrary::Behaviors::cruise12;
             perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
             perform action :>> land :> DroneLibrary::Behaviors::landStandard;
             perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
+            perform action :>> turn :> DroneLibrary::Behaviors::turnStandard;
         }
         part regional : Hexacopter {
             doc /* 5 kg parcels, motor-out redundancy */
@@ -146,11 +170,13 @@ package DroneArchitectures {
             part :>> motors :> DroneLibrary::Catalog::m6215;
             part :>> propellers :> DroneLibrary::Catalog::prop22x7;
             part :>> payload :> DroneLibrary::Catalog::box5kg;
+            part :>> controller :> DroneLibrary::Catalog::fcRegional;
             perform action :>> takeoff :> DroneLibrary::Behaviors::takeoffStandard;
             perform action :>> cruise :> DroneLibrary::Behaviors::cruise12;
             perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
             perform action :>> land :> DroneLibrary::Behaviors::landStandard;
             perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
+            perform action :>> turn :> DroneLibrary::Behaviors::turnStandard;
         }
         part regionalLiIon : Hexacopter {
             doc /* Li-ion pack for endurance: the pack cannot deliver full-throttle power */
@@ -159,11 +185,13 @@ package DroneArchitectures {
             part :>> motors :> DroneLibrary::Catalog::m6215;
             part :>> propellers :> DroneLibrary::Catalog::prop22x7;
             part :>> payload :> DroneLibrary::Catalog::box5kg;
+            part :>> controller :> DroneLibrary::Catalog::fcRegionalLiIon;
             perform action :>> takeoff :> DroneLibrary::Behaviors::takeoffStandard;
             perform action :>> cruise :> DroneLibrary::Behaviors::cruise10;
             perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
             perform action :>> land :> DroneLibrary::Behaviors::landGentle;
             perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
+            perform action :>> turn :> DroneLibrary::Behaviors::turnStandard;
         }
         part heavyLift : Octocopter {
             doc /* 10 kg winch delivery */
@@ -172,11 +200,13 @@ package DroneArchitectures {
             part :>> motors :> DroneLibrary::Catalog::m6215;
             part :>> propellers :> DroneLibrary::Catalog::prop22x7;
             part :>> payload :> DroneLibrary::Catalog::winch10kg;
+            part :>> controller :> DroneLibrary::Catalog::fcHeavyLift;
             perform action :>> takeoff :> DroneLibrary::Behaviors::takeoffGentle;
             perform action :>> cruise :> DroneLibrary::Behaviors::cruise10;
             perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
             perform action :>> land :> DroneLibrary::Behaviors::landGentle;
             perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
+            perform action :>> turn :> DroneLibrary::Behaviors::turnGentle;
             perform action :>> winch :> DroneLibrary::Behaviors::winch1;
         }
     }

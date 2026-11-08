@@ -7,6 +7,8 @@ import type {
   InstanceRequest,
   EvidenceRecord,
   MissionEvaluation,
+  SystemSimulationResult,
+  TuneResult,
   StoredResult,
   MissionRequest,
   SimulationRequest,
@@ -94,6 +96,10 @@ export const api = {
   evidence: (projectId: string) => call<EvidenceRecord[]>(`${M}/projects/${projectId}/evidence`),
   recordEvidence: (resultId: string, tag: boolean) =>
     call<CatalogChange & { tag: string | null }>(`${M}/results/${resultId}/evidence`, { method: "POST", json: { tag } }),
+  simulateSystems: (projectId: string, req: { architecture?: string; systems?: string[]; simulation?: string }) =>
+    call<SystemSimulationResult>(`${M}/projects/${projectId}/catalog/configurations/simulate`, { method: "POST", json: req }),
+  tuneSystem: (projectId: string, system: string, simulation?: string) =>
+    call<TuneResult>(`${M}/projects/${projectId}/catalog/configurations/tune`, { method: "POST", json: { system, simulation } }),
   simulateMission: (projectId: string, req: SimulationRequest) =>
     call<SimulationResult>(`${M}/projects/${projectId}/catalog/missions/simulate`, { method: "POST", json: req }),
   evaluateMissions: (projectId: string, missionType: string, draft: StepRequest[] | null) =>

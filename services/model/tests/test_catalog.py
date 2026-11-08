@@ -268,3 +268,31 @@ def test_simulation_evidence_is_found_with_its_metadata_values():
     assert ev["values"] == {"resultId": "r-1", "uri": "/api/models/results/r-1", "verdict": "holds", "verdicts": 'Energy "holds"'}
     with pytest.raises(catalog.CatalogError):
         catalog.evidence_text("1bad", "B::Sim", "drone", "B::Cfg::d1", {})
+
+
+def test_system_simulations_and_their_requirements():
+    graph = {
+        "nodes": MISSION_GRAPH["nodes"]
+        + [
+            node("B__SystemSimulation", "metadata def", "SystemSimulation", "B"),
+            node("B__Ctl", "verification def", "Ctl", "B", tool={"toolName": "controlSimulator"}, metadata=["SystemSimulation"]),
+            node("B__Ctl__drone", "subject", "drone", "B__Ctl", typeId="B__Drone"),
+            node("B__Ctl__margin", "param", "margin", "B__Ctl", direction="out"),
+            node("B__Tune", "analysis def", "Tune", "B", tool={"toolName": "controlSimulator"}, metadata=["SystemSimulation"]),
+            node("B__Tune__drone", "subject", "drone", "B__Tune", typeId="B__Drone"),
+            node("B__Stable", "requirement def", "Stable", "B"),
+            node("B__Stable__drone", "subject", "drone", "B__Stable", typeId="B__Drone"),
+            node("B__Stable__margin", "param", "margin", "B__Stable", direction="in"),
+        ],
+        "edges": MISSION_GRAPH["edges"] + [{"id": "v1", "kind": "verify", "source": "B__Ctl", "target": "B__Stable"}],
+    }
+    cat = catalog.build(graph, {"Lib.sysml": {"id": "lib", "name": "Lib"}})
+    sims = {s["name"]: s for s in cat["simulations"]}
+    assert (sims["Ctl"]["scope"], sims["Ctl"]["kind"]) == ("system", "verification def")
+    assert (sims["Tune"]["scope"], sims["Tune"]["kind"]) == ("system", "analysis def")
+    [arch] = cat["architectures"]
+    assert arch["systemSimulations"] == ["B::Ctl", "B::Tune"] and arch["simulations"] == []
+    # a requirement a system simulation verifies is a system requirement, not a mission one
+    assert arch["systemRequirements"] == ["B::Stable"]
+    assert arch["missionRequirements"] == ["B::Energy"]
+    assert cat["tags"]["SystemSimulation"] == "B::SystemSimulation"

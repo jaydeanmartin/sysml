@@ -494,7 +494,7 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
               </div>
             )}
 
-            {draft && catalog.simulations.length > 0 && (
+            {draft && catalog.simulations.some((s) => s.scope !== "system") && (
               <MissionSimulation
                 projectId={projectId}
                 missionType={mtype.qualifiedName}
@@ -502,7 +502,7 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
                 draft={current && !stepsChanged ? null : clean(draft.steps)}
                 label={current && !stepsChanged ? current.name : "draft"}
                 systems={catalog.configurations}
-                simulations={catalog.simulations}
+                simulations={catalog.simulations.filter((s) => s.scope !== "system")}
                 ensureSaved={ensureSaved}
                 refreshKey={catalog}
                 disabled={!draft.steps.length || incomplete}
