@@ -237,3 +237,34 @@ def test_mission_simulations_are_tool_bound_defs_with_a_subject():
     assert sim["toolName"] == "missionSimulator" and sim["subject"] == "drone"
     assert sim["inputs"] == [{"name": "hoverPower", "value": "drone.hoverPower"}]
     assert cat["architectures"][0]["simulations"] == ["B::Sim"]
+
+
+def test_simulation_evidence_is_found_with_its_metadata_values():
+    block = catalog.evidence_text(
+        "d1_trip", "B::Sim", "drone", "B::Cfg::d1",
+        {"resultId": "r-1", "uri": "/api/models/results/r-1", "verdict": "holds", "verdicts": 'Energy "holds"'},
+        "trip flown by d1",
+    )
+    assert block[:3] == ["verification d1_trip : B::Sim {", "    doc /* trip flown by d1 */", "    subject drone = B::Cfg::d1;"]
+    assert '        verdicts = "Energy \\"holds\\"";' in block
+    text = "package Ev {\n" + "".join(f"    {l}\n" for l in block) + "}\n"
+    # the element spans lines 2..11 of Ev.sysml
+    graph = {
+        "nodes": MISSION_GRAPH["nodes"]
+        + [
+            node("B__Sim", "verification def", "Sim", "B", tool={"toolName": "missionSimulator"}),
+            node("B__Sim__drone", "subject", "drone", "B__Sim", typeId="B__Drone"),
+            node("Ev", "package", "Ev", file="Ev.sysml"),
+            {**node("Ev__d1_trip", "verification", "d1_trip", "Ev", file="Ev.sysml", typeId="B__Sim", metadata=["SimulationEvidence"]),
+             "loc": {"file": "Ev.sysml", "line": 2, "column": 5, "endLine": 1 + len(block), "endColumn": 6}},
+            node("Ev__d1_trip__drone", "subject", "drone", "Ev__d1_trip", file="Ev.sysml", value="B::Cfg::d1"),
+            node("Ev__plain", "verification", "plain", "Ev", file="Ev.sysml", typeId="B__Sim"),  # no metadata: not evidence
+        ],
+        "edges": MISSION_GRAPH["edges"],
+    }
+    cat = catalog.build(graph, {"Lib.sysml": {"id": "lib", "name": "Lib"}, "Ev.sysml": {"id": "ev", "name": "Ev"}}, {"Ev.sysml": text})
+    [ev] = cat["evidence"]
+    assert ev["simulation"] == "B::Sim" and ev["system"] == "B::Cfg::d1" and ev["modelName"] == "Ev"
+    assert ev["values"] == {"resultId": "r-1", "uri": "/api/models/results/r-1", "verdict": "holds", "verdicts": 'Energy "holds"'}
+    with pytest.raises(catalog.CatalogError):
+        catalog.evidence_text("1bad", "B::Sim", "drone", "B::Cfg::d1", {})

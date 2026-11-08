@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import type { CatalogAttribute, CatalogChange, Component, ComponentInstance } from "../types";
 import { NAME_RE, partText, placeholder, ref, short, type CatalogPanelProps } from "./catalogUtil";
+import { ComponentPerformance, curveKind } from "./ComponentPerformance";
 
 interface InstanceForm {
   component: string;
@@ -422,6 +423,27 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
                   )}
                 </div>}
               </div>
+              )}
+
+              {curveKind(comp) && (
+                <ComponentPerformance
+                  key={comp.qualifiedName}
+                  comp={comp}
+                  catalog={catalog}
+                  instances={shown}
+                  editing={
+                    form && formComp && family(comp).has(formComp.qualifiedName) && curveKind(formComp)
+                      ? {
+                          label: form.replace ? short(form.replace) : form.name || "the new instance",
+                          // what the instance will be: the component's defaults, then the form's values
+                          values: {
+                            ...Object.fromEntries(formComp.attributes.filter((a) => a.value).map((a) => [a.name, a.value!])),
+                            ...Object.fromEntries(Object.entries(form.values).filter(([, v]) => v.trim())),
+                          },
+                        }
+                      : null
+                  }
+                />
               )}
 
               <div className="section-title row-between">

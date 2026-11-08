@@ -553,6 +553,13 @@ export interface SimulationRun {
   /** requirements the simulation verifies -> verdict */
   verdicts?: Record<string, "holds" | "fails" | "error">;
   verification?: Record<string, Verification>;
+  /** the stored result (GET /api/models/results/{id}) */
+  resultId?: string;
+  /** true when the outputs came from a stored result with the same inputs (the simulator was not called) */
+  reused?: boolean;
+  /** the project commit that was simulated */
+  commitId?: string | null;
+  toolVersion?: string | null;
 }
 
 export interface SimulationResult {
@@ -585,4 +592,41 @@ export interface MissionSimulationDef extends Located {
   outputs: string[];
   /** requirement defs it verifies */
   verifies: string[];
+}
+
+/** a simulation result in the results store (outside the SysML v2 repository) */
+export interface StoredResult {
+  id: string;
+  runId: string;
+  projectId: string;
+  commitId: string | null;
+  missionType: string;
+  /** qualified name, or "draft" */
+  mission: string;
+  system: string;
+  simulation: string;
+  toolName: string;
+  toolVersion: string | null;
+  inputHash: string;
+  /** without timeline, steps and curves in listings */
+  outputs: Record<string, unknown> | null;
+  units: Record<string, string>;
+  verdicts: Record<string, "holds" | "fails" | "error">;
+  verification: Record<string, Verification>;
+  error: string | null;
+  reusedFrom: string | null;
+  createdAt: string;
+}
+
+/** a result recorded as verification evidence in the model */
+export interface EvidenceRecord extends Located {
+  simulation: string;
+  /** the system instance the simulation's subject is bound to */
+  system: string | null;
+  /** SimulationEvidence metadata: resultId, uri, commitId, mission, verdict, verdicts, recordedAt */
+  values: Record<string, string>;
+  /** current: the newest result for this mission, system and simulation has the same inputs, simulator version and verdicts */
+  status: "current" | "outdated" | "missing";
+  result: StoredResult | null;
+  latestResultId: string | null;
 }

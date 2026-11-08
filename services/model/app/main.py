@@ -15,9 +15,12 @@ import os
 import re
 import threading
 import time
+import hashlib
+import json
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
@@ -737,7 +740,7 @@ def _project_catalog(project_id: uuid.UUID) -> tuple[dict[str, Any], dict[str, s
     files = [{"name": f"{r['name']}.sysml", "text": r["source"]} for r in rows]
     parsed = _interpreter("/parse", {"files": files})
     file_models = {f"{r['name']}.sysml": {"id": str(r["id"]), "name": r["name"]} for r in rows}
-    cat = catalog.build(parsed["graph"], file_models)
+    cat = catalog.build(parsed["graph"], file_models, {f"{r['name']}.sysml": r["source"] for r in rows})
     cat["diagnostics"] = [d for d in parsed["diagnostics"] if d["severity"] == "error"]
     return cat, sources
 
@@ -1132,14 +1135,17 @@ def _run_missions(
                     res["verdicts"][c["requirement"]] = "holds" if v == "true" else "fails" if v == "false" else "error"
                     res["verification"][c["requirement"]]["values"] = {p: res["totals"].get(p) for p in c["params"]}
 
-    # the simulations, through the analysis service
+    # the simulations, through the analysis service (or a stored result with the same inputs)
     run_id = str(uuid.uuid4())
+    with db.pool.connection() as c:
+        commit_id = repo.head(c, project_id)
+    versions = _tool_versions({p["sim"]["toolName"] for p in plans.values()})
 
     def call(item: tuple[tuple[str, str, str], dict[str, Any]]) -> tuple[tuple[str, str, str], dict[str, Any]]:
         k, p = item
         sim = p["sim"]
         inputs: dict[str, Any] = {name: _value(got.get(expr)) for name, expr in p["inputs"].items()}
-        res: dict[str, Any] = {"simulation": sim["qualifiedName"], "toolName": sim["toolName"], "inputs": inputs}
+        res: dict[str, Any] = {"simulation": sim["qualifiedName"], "toolName": sim["toolName"], "toolVersion": versions.get(sim["toolName"]), "inputs": inputs}
         missing = [name for name, v in inputs.items() if v is None]
         if missing:
             return k, res | {"error": f"could not evaluate {', '.join(missing)}"}
@@ -1152,6 +1158,16 @@ def _run_missions(
             }
             for s, fs in p["steps"]
         ]
+        sent = {**inputs, "steps": steps}
+        res["_hash"] = _input_hash(sim["toolName"], res["toolVersion"], sent)
+        res["_sent"] = sent
+        stored = _stored_result(project_id, commit_id, k[0], k[1], sim["qualifiedName"], sim["toolName"], res["_hash"])
+        if stored:
+            same = stored["commit_id"] == commit_id and stored["mission"] == k[0] and stored["system"] == k[1]
+            return k, res | {
+                "outputs": stored["outputs"], "units": stored["units"],
+                "_stored": str(stored["id"]) if same else None, "_reused": str(stored["id"]),
+            }
         try:
             r = httpx.post(
                 f"{ANALYSIS_URL}/analyses/{sim['toolName']}/invoke",
@@ -1202,10 +1218,69 @@ def _run_missions(
         for res, rq, expr in pending:
             v = got2.get(expr)
             res["verdicts"][rq] = "holds" if v == "true" else "fails" if v == "false" else "error"
+
+    # every simulation result into the results store (outside the SysML v2 repository)
+    draft_steps = [s.model_dump() for s in draft] if draft is not None else None
+    with db.pool.connection() as c, c.transaction():
+        for key, per_cfg in out.items():
+            for cfg_qn, res in per_cfg.items():
+                for sim_q, sres in res["simulations"].items():
+                    if "_hash" not in sres:
+                        continue  # nothing was sent: no result to keep
+                    mine = {rq: v for rq, v in res["verification"].items() if v.get("by") == sim_q}
+                    rid = sres.pop("_stored", None)
+                    if not rid:
+                        rid = str(uuid.uuid4())
+                        c.execute(
+                            """INSERT INTO models.simulation_result
+                               (id, run_id, project_id, commit_id, mission_type, mission, draft_steps, system, simulation,
+                                tool_name, tool_version, input_hash, inputs, outputs, units, verdicts, verification, error, reused_from)
+                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+                            (
+                                rid, run_id, project_id, commit_id, mtype["qualifiedName"], key,
+                                Jsonb(draft_steps) if key == "draft" else None, cfg_qn, sim_q, sres["toolName"], sres["toolVersion"],
+                                sres["_hash"], Jsonb(sres["_sent"]), Jsonb(sres.get("outputs")), Jsonb(sres.get("units") or {}),
+                                Jsonb({rq: res["verdicts"].get(rq) for rq in mine}), Jsonb(mine), sres.get("error"), sres.get("_reused"),
+                            ),
+                        )
+                    sres["resultId"] = rid
+                    sres["reused"] = bool(sres.pop("_reused", None))
+                    sres["commitId"] = str(commit_id) if commit_id else None
+                    sres.pop("_hash"), sres.pop("_sent")
     for per_cfg in out.values():
         for res in per_cfg.values():
             res.pop("checks")
     return out, errors, run_id
+
+
+def _tool_versions(tools: set[str]) -> dict[str, str | None]:
+    """The registry's version of each analysis: a result is only reused for the same one."""
+    out: dict[str, str | None] = {}
+    for t in tools:
+        try:
+            r = httpx.get(f"{ANALYSIS_URL}/analyses/{t}", timeout=10)
+            out[t] = str(r.json().get("version")) if r.status_code == 200 else None
+        except (httpx.HTTPError, ValueError):
+            out[t] = None
+    return out
+
+
+def _input_hash(tool: str, version: str | None, sent: dict[str, Any]) -> str:
+    return hashlib.sha256(json.dumps({"tool": tool, "version": version, "inputs": sent}, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _stored_result(project_id: Any, commit_id: Any, mission: str, system: str, simulation: str, tool: str, input_hash: str) -> dict[str, Any] | None:
+    """A stored result for the same simulator inputs: this very flight at this
+    commit first, else any with outputs (the tool's version is in the hash)."""
+    with db.pool.connection() as c:
+        return c.execute(
+            """SELECT id, commit_id, mission, system, outputs, units FROM models.simulation_result
+               WHERE tool_name=%s AND input_hash=%s AND outputs IS NOT NULL
+               ORDER BY (project_id=%s AND commit_id IS NOT DISTINCT FROM %s AND mission=%s AND system=%s AND simulation=%s) DESC,
+                        created_at DESC
+               LIMIT 1""",
+            (tool, input_hash, project_id, commit_id, mission, system, simulation),
+        ).fetchone()
 
 
 @app.post("/projects/{project_id}/catalog/missions/evaluate")
@@ -1292,12 +1367,182 @@ def _first_simulation(cat: dict[str, Any], cfg_qn: str) -> str | None:
     return arch["simulations"][0] if arch and arch["simulations"] else None
 
 
+# ------------------------------------------------------------------ simulation results and evidence
+EVIDENCE_MODEL = "VerificationEvidence"
+
+
+def _result_json(r: dict[str, Any], full: bool = True) -> dict[str, Any]:
+    outputs = r["outputs"]
+    if outputs and not full:
+        outputs = {k: v for k, v in outputs.items() if k not in BULKY_OUTPUTS}
+    out = {
+        "id": str(r["id"]), "runId": str(r["run_id"]), "projectId": str(r["project_id"]),
+        "commitId": str(r["commit_id"]) if r["commit_id"] else None,
+        "missionType": r["mission_type"], "mission": r["mission"], "system": r["system"], "simulation": r["simulation"],
+        "toolName": r["tool_name"], "toolVersion": r["tool_version"], "inputHash": r["input_hash"],
+        "outputs": outputs, "units": r["units"], "verdicts": r["verdicts"], "verification": r["verification"],
+        "error": r["error"], "reusedFrom": str(r["reused_from"]) if r["reused_from"] else None,
+        "createdAt": r["created_at"].isoformat(),
+    }
+    if full:
+        out["inputs"] = r["inputs"]
+        out["draftSteps"] = r["draft_steps"]
+    return out
+
+
+@app.get("/results/{result_id}")
+def get_result(result_id: uuid.UUID) -> dict[str, Any]:
+    """A stored simulation result: what was sent to the simulator, everything it returned, and the verdicts."""
+    with db.pool.connection() as c:
+        r = c.execute("SELECT * FROM models.simulation_result WHERE id=%s", (result_id,)).fetchone()
+    if not r:
+        raise HTTPException(404, "result not found")
+    return _result_json(r)
+
+
+@app.get("/projects/{project_id}/results")
+def list_results(
+    project_id: uuid.UUID, mission: str | None = None, system: str | None = None, limit: int = Query(50, ge=1, le=500)
+) -> list[dict[str, Any]]:
+    """Stored simulation results of a project, newest first, without inputs, timelines or curves."""
+    q = "SELECT * FROM models.simulation_result WHERE project_id=%s"
+    args: list[Any] = [project_id]
+    for col, v in (("mission", mission), ("system", system)):
+        if v:
+            q += f" AND {col}=%s"
+            args.append(v)
+    with db.pool.connection() as c:
+        rows = c.execute(q + " ORDER BY created_at DESC LIMIT %s", (*args, limit)).fetchall()
+    return [_result_json(r, full=False) for r in rows]
+
+
+def _evidence_status(project_id: uuid.UUID, evidence: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Evidence elements of the catalog with their stored result and whether they
+    are current: the newest result for the same mission, system and simulation
+    has the same simulator inputs, simulator version and verdicts."""
+    ids = [e["values"].get("resultId") for e in evidence if repo.is_uuid(e["values"].get("resultId"))]
+    with db.pool.connection() as c:
+        rows = {str(r["id"]): r for r in c.execute("SELECT * FROM models.simulation_result WHERE id = ANY(%s::uuid[])", (ids,)).fetchall()} if ids else {}
+        out = []
+        for e in evidence:
+            r = rows.get(e["values"].get("resultId") or "")
+            status, latest_id = "missing", None
+            if r:
+                latest = c.execute(
+                    """SELECT id, input_hash, tool_version, verdicts FROM models.simulation_result
+                       WHERE project_id=%s AND mission=%s AND system=%s AND simulation=%s AND outputs IS NOT NULL
+                       ORDER BY created_at DESC LIMIT 1""",
+                    (project_id, r["mission"], r["system"], r["simulation"]),
+                ).fetchone()
+                latest_id = str(latest["id"])
+                same = (latest["input_hash"], latest["tool_version"], latest["verdicts"]) == (r["input_hash"], r["tool_version"], r["verdicts"])
+                status = "current" if same else "outdated"
+            out.append({**e, "status": status, "result": _result_json(r, full=False) if r else None, "latestResultId": latest_id})
+    return out
+
+
+@app.get("/projects/{project_id}/evidence")
+def list_evidence(project_id: uuid.UUID) -> list[dict[str, Any]]:
+    """Simulation evidence recorded in the project's models, each with its stored
+    result and whether it is still current (see ``_evidence_status``)."""
+    cat, _ = _project_catalog(project_id)
+    return _evidence_status(project_id, cat["evidence"])
+
+
+class EvidenceIn(BaseModel):
+    tag: bool = Field(False, description="also tag the commit that was simulated")
+
+
+@app.post("/results/{result_id}/evidence", status_code=201)
+def record_evidence(result_id: uuid.UUID, body: EvidenceIn) -> dict[str, Any]:
+    """Record a stored result as verification evidence in the model: a
+    verification usage of the simulation, with its subject bound to the system
+    instance and SimulationEvidence metadata pointing at the result. It goes into
+    the project's VerificationEvidence model (created if needed) and replaces the
+    evidence already recorded for the same mission, system and simulation. The
+    evidence commit is a new version; the evidence names the commit simulated."""
+    with db.pool.connection() as c:
+        r = c.execute("SELECT * FROM models.simulation_result WHERE id=%s", (result_id,)).fetchone()
+    if not r:
+        raise HTTPException(404, "result not found")
+    if r["mission"] == "draft":
+        raise HTTPException(422, "a draft mission is not in the model: save the mission, simulate it, then record the result")
+    if not r["outputs"]:
+        raise HTTPException(422, f"the simulation failed, there is nothing to record: {r['error']}")
+    project_id = r["project_id"]
+    cat, sources = _project_catalog(project_id)
+    sim = _find(cat["simulations"], r["simulation"], "simulation")
+    _find(cat["configurations"], r["system"], "system instance")
+    tag = cat["tags"].get(catalog.EVIDENCE_TAG)
+
+    # the evidence model, created on first use
+    pkg = next((p for p in cat["packages"] if p["modelName"] == EVIDENCE_MODEL and "::" not in p["qualifiedName"]), None)
+    if not pkg:
+        with db.pool.connection() as c:
+            if c.execute("SELECT 1 FROM models.model WHERE project_id=%s AND name=%s", (project_id, EVIDENCE_MODEL)).fetchone():
+                raise HTTPException(409, f"the {EVIDENCE_MODEL} model has no package {EVIDENCE_MODEL}: fix it in the editor")
+        create_model(project_id, ModelIn(name=EVIDENCE_MODEL, description="Mission simulation results recorded as verification evidence",
+                                         source=catalog.EVIDENCE_PACKAGE.format(name=EVIDENCE_MODEL)))
+        cat, sources = _project_catalog(project_id)
+        pkg = _package(cat, EVIDENCE_MODEL)
+        tag = cat["tags"].get(catalog.EVIDENCE_TAG)
+    if not tag:
+        raise HTTPException(409, f"no 'metadata def {catalog.EVIDENCE_TAG}' in this project")
+
+    verdicts = r["verdicts"] or {}
+    overall = "holds" if verdicts and all(v == "holds" for v in verdicts.values()) else "fails" if verdicts else "none verified"
+    mission = r["mission"]
+    values = {
+        "resultId": str(r["id"]),
+        "uri": f"/api/models/results/{r['id']}",
+        "commitId": str(r["commit_id"]) if r["commit_id"] else "",
+        "mission": mission,
+        "verdict": overall,
+        "verdicts": "; ".join(f"{short_name(q)} {v}" for q, v in verdicts.items()),
+        "recordedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+    }
+    name = re.sub(r"\W", "_", f"{short_name(r['system'])}_{short_name(mission)}")
+    if len(cat["simulations"]) > 1:  # evidence of each simulation of the same flight
+        name += f"_{short_name(r['simulation'])}"
+    replace = next(
+        (e for e in cat["evidence"] if e["values"].get("mission") == mission and e["system"] == r["system"] and e["simulation"] == r["simulation"]),
+        None,
+    )
+    model_id, pkg_qn, apply = _place(cat, sources, name, pkg["qualifiedName"], replace)
+    o = r["outputs"]
+    doc = f"{short_name(mission)} flown by {short_name(r['system'])}: {overall}"
+    if isinstance(o.get("energyPercent"), (int, float)):
+        doc += f", {o['energyPercent']:.1f} % of the battery"
+    if isinstance(o.get("missionTime"), (int, float)):
+        doc += f", {o['missionTime'] / 60:.1f} min"
+    try:
+        block = catalog.evidence_text(
+            name, sim["qualifiedName"], sim["subject"], r["system"], values, doc, catalog.ref(tag, pkg_qn),
+        )
+        source = apply(block)
+    except catalog.CatalogError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    res = _commit(model_id, source, f"Record evidence: {doc}")
+
+    tagged = None
+    if body.tag and r["commit_id"]:
+        tag_name = f"verified/{short_name(mission)}/{short_name(r['system'])}/{str(r['id'])[:8]}"
+        with db.pool.connection() as c:
+            row = c.execute(
+                """INSERT INTO models.tags (project_id, name, description, alias, tagged_commit_id) VALUES (%s,%s,%s,%s,%s)
+                   ON CONFLICT (project_id, name) DO NOTHING RETURNING name""",
+                (project_id, tag_name, f"{doc} (result {r['id']})", [], r["commit_id"]),
+            ).fetchone()
+        tagged = tag_name if row else None
+    return res | {"qualifiedName": f"{pkg_qn}::{name}", "text": "\n".join(block), "tag": tagged}
+
+
 @app.delete("/projects/{project_id}/catalog/elements")
 def delete_catalog_element(project_id: uuid.UUID, qualifiedName: str) -> dict[str, Any]:
     """Remove a component, behavior, instance, system instance or mission from its
     model's text. Refused while something else still refers to it."""
     cat, sources = _project_catalog(project_id)
-    items = cat["components"] + cat["instances"] + cat["configurations"] + cat["missions"]
+    items = cat["components"] + cat["instances"] + cat["configurations"] + cat["missions"] + cat["evidence"]
     item = _find(items, qualifiedName, "element")
     source = catalog.remove_element(sources[item["modelId"]], item["loc"])
     return _commit(item["modelId"], source, f"Remove {item['name']}") | {"qualifiedName": qualifiedName}

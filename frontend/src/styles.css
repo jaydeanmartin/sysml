@@ -364,3 +364,7 @@ td.nowrap { white-space: nowrap; }
 .chart .op-point.on { fill: var(--accent); }
 .chart .op-label { fill: var(--text); font-size: 10.5px; paint-order: stroke; stroke: var(--surface); stroke-width: 3px; stroke-linejoin: round; }
 .chart-tip.mini-tip { min-width: 0; max-width: 340px; white-space: nowrap; }
+
+/* ------------------------------------------------------------ simulation evidence */
+.evidence-cell { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; white-space: nowrap; }
+.section-toggle { padding: 0; font: inherit; color: inherit; text-transform: inherit; letter-spacing: inherit; font-weight: inherit; }

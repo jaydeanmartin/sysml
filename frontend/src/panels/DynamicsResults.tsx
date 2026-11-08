@@ -192,7 +192,7 @@ function PowerChart({ runs, color, focus, setFocus }: Props) {
 }
 
 // ------------------------------------------------------------------ component curves
-interface Point {
+export interface Point {
   label: string;
   x: number;
   y: number;
@@ -250,7 +250,7 @@ const MM = { top: 10, right: 12, bottom: 34, left: 50 };
 /** One measure against one x: the curve as a 2px line, operating points as
  *  ringed markers labelled with their behaviors, a crosshair that reads the
  *  curve, and a tooltip with the full operating point under the pointer. */
-function MiniChart({ title, unit, xLabel, curve, points, fmtX, fmtY }: { title: string; unit: string; xLabel: string; curve: { x: number; y: number }[]; points: Point[]; fmtX(v: number): string; fmtY(v: number): string }) {
+export function MiniChart({ title, unit, xLabel, curve, points, fmtX, fmtY }: { title: string; unit: string; xLabel: string; curve: { x: number; y: number }[]; points: Point[]; fmtX(v: number): string; fmtY(v: number): string }) {
   const svg = useRef<SVGSVGElement>(null);
   const [hover, setHover] = useState<{ px: number; x: number; point: Point[] | null } | null>(null);
   const xs = [...curve.map((c) => c.x), ...points.map((p) => p.x)];
@@ -282,7 +282,7 @@ function MiniChart({ title, unit, xLabel, curve, points, fmtX, fmtY }: { title: 
     let y = py - 6;
     while (placed.some((b) => b.x0 < x0 + w && x0 < b.x1 && Math.abs(b.y - y) < 12)) y += 12;
     placed.push({ x0, x1: x0 + w, y });
-    return { text, x: right ? px + 7 : px - 7, y, anchor: right ? "start" : "end" };
+    return { text, x: right ? px + 7 : px - 7, y, anchor: right ? ("start" as const) : ("end" as const) };
   });
   const curveAt = (v: number) => {
     const i = curve.findIndex((c) => c.x >= v);
@@ -306,7 +306,7 @@ function MiniChart({ title, unit, xLabel, curve, points, fmtX, fmtY }: { title: 
         <span className="strong small">{title}</span> <span className="muted small">{unit}</span>
       </div>
       <div className="chart-wrap">
-        <svg ref={svg} viewBox={`0 0 ${MW} ${MH}`} className="chart" onPointerMove={move} onPointerLeave={() => setHover(null)} role="img" aria-label={`${title} against ${xLabel}, with operating points ${points.map((p) => p.label).join(", ")}`}>
+        <svg ref={svg} viewBox={`0 0 ${MW} ${MH}`} className="chart" onPointerMove={move} onPointerLeave={() => setHover(null)} role="img" aria-label={`${title} against ${xLabel}${points.length ? `, with operating points ${points.map((p) => p.label).join(", ")}` : ""}`}>
           {yt.map((v) => (
             <g key={v}>
               <line x1={MM.left} x2={MW - MM.right} y1={Y(v)} y2={Y(v)} className="grid" />

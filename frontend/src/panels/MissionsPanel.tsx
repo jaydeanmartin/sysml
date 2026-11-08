@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import type { CatalogChange, Component, FlownMission, Mission, MissionEvaluation, MissionType, StepRequest, Verification } from "../types";
+import type { CatalogChange, Component, EvidenceRecord, FlownMission, Located, Mission, MissionEvaluation, MissionType, StepRequest, Verification } from "../types";
 import { NAME_RE, errorText, partText, placeholder, ref, short, type CatalogPanelProps } from "./catalogUtil";
 import { MissionSimulation } from "./MissionSimulation";
+import { StoredResults } from "./StoredResults";
 
 interface Draft {
   name: string;
@@ -55,6 +56,10 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
   const [busy, setBusy] = useState(false);
   const [evaluating, setEvaluating] = useState(false);
   const [evals, setEvals] = useState<Record<string, Evaluation>>({});
+  // simulation evidence recorded in the model, with whether each is still current
+  const [evidence, setEvidence] = useState<EvidenceRecord[]>([]);
+  const [tagOnRecord, setTagOnRecord] = useState(false);
+  const [recordNote, setRecordNote] = useState<string | null>(null);
 
   const types = catalog?.missionTypes || [];
   const mtype = types.find((t) => t.qualifiedName === typeQn) || types[0];
@@ -188,6 +193,15 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
     }
   };
 
+  // evidence status depends on the model (catalog) and on the newest stored results (evaluations)
+  useEffect(() => {
+    let stale = false;
+    api.evidence(projectId).then((e) => !stale && setEvidence(e)).catch(() => !stale && setEvidence([]));
+    return () => {
+      stale = true;
+    };
+  }, [projectId, catalog, evals]);
+
   // the catalog is re-read after every save: refresh an evaluation already on screen
   useEffect(() => {
     if (mtype && evals[mtype.qualifiedName]) evaluate();
@@ -245,6 +259,12 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
   const flight = flyerQn ? draftResults?.[flyerQn] : undefined;
   const timeTotal = totals[0];
   const reqDocs = Object.fromEntries(catalog.requirements.map((r) => [r.qualifiedName, r.doc || ""]));
+  const savedMission = current && !stepsChanged ? current.qualifiedName : null;
+  const record = async (resultId: string) => {
+    setRecordNote(null);
+    const r = await run(() => api.recordEvidence(resultId, tagOnRecord));
+    if (r) setRecordNote(`Recorded ${short(r.qualifiedName)} in ${r.modelName} (version ${r.version})${(r as { tag?: string | null }).tag ? `; tagged ${(r as { tag?: string }).tag}` : ""}.`);
+  };
 
   return (
     <div className="panel lib">
@@ -442,7 +462,27 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
                 </div>
 
                 <code className="block">{preview}</code>
-                {draftResults && <VerificationTable results={draftResults} docs={reqDocs} />}
+                {draftResults && (
+                  <>
+                    <VerificationTable
+                      results={draftResults}
+                      docs={reqDocs}
+                      mission={savedMission}
+                      evidence={evidence}
+                      busy={busy}
+                      onRecord={record}
+                      onOpen={onOpen}
+                    />
+                    {Object.values(draftResults).some((r) => Object.keys(r.simulations || {}).length) && (
+                      <div className="row-between">
+                        <label className="inline small" title="Also tag the project commit that was simulated, so the verified version can be found later">
+                          <input type="checkbox" checked={tagOnRecord} onChange={(e) => setTagOnRecord(e.target.checked)} /> tag the simulated version when recording
+                        </label>
+                        {recordNote && <span className="hint">{recordNote}</span>}
+                      </div>
+                    )}
+                  </>
+                )}
                 <div className="row-end">
                   {incomplete && <span className="hint">Every step needs all its quantities.</span>}
                   {!incomplete && !draftResults && draft.steps.length > 0 && <span className="hint">Evaluate to fly it with every system instance.</span>}
@@ -468,6 +508,7 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
                 disabled={!draft.steps.length || incomplete}
               />
             )}
+            {savedMission && <StoredResults projectId={projectId} mission={savedMission} evidence={evidence} refreshKey={`${evaluation?.at}|${catalog.missions.length}|${evidence.length}`} />}
 
             <div className="section-title row-between">
               <span>Compare missions</span>
@@ -557,8 +598,26 @@ function how(v?: Verification): string {
 }
 
 /** each system's verdict on each mission requirement, and how it was verified */
-function VerificationTable({ results, docs }: { results: Record<string, FlownMission>; docs: Record<string, string> }) {
+function VerificationTable({
+  results,
+  docs,
+  mission,
+  evidence,
+  busy,
+  onRecord,
+  onOpen,
+}: {
+  results: Record<string, FlownMission>;
+  docs: Record<string, string>;
+  /** the saved mission shown, null for a draft (which cannot be recorded) */
+  mission: string | null;
+  evidence: EvidenceRecord[];
+  busy: boolean;
+  onRecord(resultId: string): void;
+  onOpen(el: Located): void;
+}) {
   const reqs = [...new Set(Object.values(results).flatMap((r) => Object.keys(r.verification || {})))];
+  const withSims = Object.values(results).some((r) => Object.keys(r.simulations || {}).length);
   if (!reqs.length) return null;
   const method = (q: string) => Object.values(results).find((r) => r.verification?.[q])?.verification[q];
   return (
@@ -576,6 +635,7 @@ function VerificationTable({ results, docs }: { results: Record<string, FlownMis
                 </th>
               );
             })}
+            {withSims && <th title="Simulation results recorded as verification evidence in the model (VerificationEvidence)">Evidence</th>}
           </tr>
         </thead>
         <tbody>
@@ -583,7 +643,7 @@ function VerificationTable({ results, docs }: { results: Record<string, FlownMis
             <tr key={qn}>
               <td className="mono strong">{short(qn)}</td>
               {r.problems.length ? (
-                <td colSpan={reqs.length} className="muted small">
+                <td colSpan={reqs.length + (withSims ? 1 : 0)} className="muted small">
                   ⊘ {r.problems.join("; ")}
                 </td>
               ) : (
@@ -597,6 +657,51 @@ function VerificationTable({ results, docs }: { results: Record<string, FlownMis
                     </td>
                   );
                 })
+              )}
+              {withSims && !r.problems.length && (
+                <td>
+                  {Object.entries(r.simulations || {}).map(([sim, run]) => {
+                    const ev = mission ? evidence.find((e) => e.values.mission === mission && e.system === qn && e.simulation === sim) : undefined;
+                    const recordable = !!mission && !!run.resultId && !!run.outputs;
+                    // this very result is the recorded one
+                    const same = ev && ev.values.resultId === run.resultId;
+                    return (
+                      <div key={sim} className="evidence-cell">
+                        {Object.keys(r.simulations || {}).length > 1 && <span className="muted small">{short(sim)} </span>}
+                        {ev && (
+                          <span
+                            className={`pill ${ev.status === "current" ? "ok" : "warn"}`}
+                            title={`${ev.qualifiedName}\nresult ${ev.values.resultId} at commit ${ev.values.commitId?.slice(0, 8)}, recorded ${ev.values.recordedAt}\n${
+                              ev.status === "current" ? "Still current: the newest result has the same inputs, simulator version and verdicts." : "Outdated: the model changed what this simulation computes or concludes since it was recorded."
+                            }`}
+                          >
+                            ◆ {ev.status === "current" ? "recorded" : ev.status === "outdated" ? "outdated" : "result missing"}
+                          </span>
+                        )}
+                        {ev && (
+                          <button className="link" onClick={() => onOpen(ev)}>
+                            Show
+                          </button>
+                        )}
+                        {(!ev || !same) && (
+                          <button
+                            className="link"
+                            disabled={busy || !recordable}
+                            title={!mission ? "Save the mission first: a draft is not in the model" : !run.outputs ? run.error || "The simulation failed" : ev ? "Replace the recorded evidence with this result" : "Record this result as verification evidence in the model"}
+                            onClick={() => run.resultId && onRecord(run.resultId)}
+                          >
+                            {ev ? "Re-record" : "Record"}
+                          </button>
+                        )}
+                        {run.resultId && (
+                          <a className="small" href={api.resultUrl(run.resultId)} target="_blank" rel="noreferrer" title={`Stored result ${run.resultId}${run.reused ? " (outputs reused: same inputs as an earlier result)" : ""}`}>
+                            data ↗
+                          </a>
+                        )}
+                      </div>
+                    );
+                  })}
+                </td>
               )}
             </tr>
           ))}

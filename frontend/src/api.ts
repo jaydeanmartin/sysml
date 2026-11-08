@@ -5,7 +5,9 @@ import type {
   ComponentRequest,
   ConfigurationRequest,
   InstanceRequest,
+  EvidenceRecord,
   MissionEvaluation,
+  StoredResult,
   MissionRequest,
   SimulationRequest,
   SimulationResult,
@@ -84,6 +86,14 @@ export const api = {
     call<CatalogChange>(`${M}/projects/${projectId}/catalog/configurations`, { method: "POST", json: req }),
   saveMission: (projectId: string, req: MissionRequest) =>
     call<CatalogChange>(`${M}/projects/${projectId}/catalog/missions`, { method: "POST", json: req }),
+  results: (projectId: string, mission?: string, system?: string, limit = 50) =>
+    call<StoredResult[]>(
+      `${M}/projects/${projectId}/results?limit=${limit}${mission ? `&mission=${encodeURIComponent(mission)}` : ""}${system ? `&system=${encodeURIComponent(system)}` : ""}`
+    ),
+  resultUrl: (resultId: string) => `${M}/results/${resultId}`,
+  evidence: (projectId: string) => call<EvidenceRecord[]>(`${M}/projects/${projectId}/evidence`),
+  recordEvidence: (resultId: string, tag: boolean) =>
+    call<CatalogChange & { tag: string | null }>(`${M}/results/${resultId}/evidence`, { method: "POST", json: { tag } }),
   simulateMission: (projectId: string, req: SimulationRequest) =>
     call<SimulationResult>(`${M}/projects/${projectId}/catalog/missions/simulate`, { method: "POST", json: req }),
   evaluateMissions: (projectId: string, missionType: string, draft: StepRequest[] | null) =>

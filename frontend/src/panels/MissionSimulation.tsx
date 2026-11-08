@@ -139,6 +139,14 @@ export function MissionSimulation({ projectId, missionType, mission, draft, labe
                     <tr key={qn} className={focus === qn ? "row-on" : ""} onMouseEnter={() => setFocus(qn)} onMouseLeave={() => setFocus(null)}>
                       <td className="nowrap">
                         <span className="legend-key" style={{ background: color(qn) }} /> <span className="mono strong">{short(qn)}</span>
+                        {r.resultId && (
+                          <div className="small">
+                            <a href={api.resultUrl(r.resultId)} target="_blank" rel="noreferrer" title={`Stored result ${r.resultId}${r.reused ? ": outputs reused from an earlier result with the same inputs" : ""}`}>
+                              data ↗
+                            </a>
+                            {r.reused && <span className="muted"> · reused</span>}
+                          </div>
+                        )}
                       </td>
                       <td className="mono num">
                         {o.energyUsed.toFixed(0)} <span className="muted">/ {Number(r.inputs?.batteryEnergy ?? 0).toFixed(0)} Wh</span>

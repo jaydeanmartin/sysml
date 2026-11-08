@@ -270,5 +270,65 @@
         "name": "timeline"
       }
     ]
+  },
+  {
+    "name": "componentCurves",
+    "kind": "external",
+    "description": "Performance curves of one propeller (CT, CP against advance ratio) or motor (full-throttle torque, speed, power, efficiency against current), as the dynamics simulator uses them (mission simulator service).",
+    "endpointUrl": "http://mission-sim:8011/curves",
+    "inputs": [
+      {
+        "name": "component",
+        "description": "propeller or motor"
+      },
+      {
+        "name": "ct0"
+      },
+      {
+        "name": "ct1"
+      },
+      {
+        "name": "ct2"
+      },
+      {
+        "name": "cp0"
+      },
+      {
+        "name": "cp1"
+      },
+      {
+        "name": "cp2"
+      },
+      {
+        "name": "kv",
+        "unit": "rpm/V"
+      },
+      {
+        "name": "resistance",
+        "unit": "ohm"
+      },
+      {
+        "name": "noLoadCurrent",
+        "unit": "A"
+      },
+      {
+        "name": "maxCurrent",
+        "unit": "A"
+      },
+      {
+        "name": "voltage",
+        "unit": "V",
+        "description": "supply voltage for a motor's full-throttle curves"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "curves"
+      },
+      {
+        "name": "summary"
+      }
+    ],
+    "timeoutSeconds": 10
   }
 ]

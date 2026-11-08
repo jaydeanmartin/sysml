@@ -14,6 +14,10 @@ A second analysis, ``dynamicsSimulator`` (``POST /dynamics``), flies the mission
 through the propulsion chain: propeller performance curves against advance
 ratio, a brushless motor model, drag, acceleration transients and battery sag.
 It reports the energy and power of every behavior. See ``dynamics``.
+
+A third, ``componentCurves`` (``POST /curves``), returns the performance curves
+of one propeller or motor from its attribute values, as the dynamic simulation
+uses them, so the Library can chart a component without flying a mission.
 """
 
 from __future__ import annotations
@@ -87,3 +91,15 @@ def run_dynamics(req: Req) -> dict[str, Any]:
     except (dynamics.SimulationError, ValueError) as exc:
         raise HTTPException(422, str(exc)) from exc
     return {"outputs": {k: ({"value": v, "unit": DYNAMICS_UNITS[k]} if k in DYNAMICS_UNITS else v) for k, v in res.items()}}
+
+
+@app.post("/curves")
+def run_curves(req: Req) -> dict[str, Any]:
+    raw = {k: _v(v) for k, v in req.inputs.items()}
+    component = raw.get("component")
+    voltage = raw.get("voltage")
+    try:
+        res = dynamics.component_curves(str(component), raw, float(voltage) if voltage is not None else None)
+    except (dynamics.SimulationError, ValueError) as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return {"outputs": res}

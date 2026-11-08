@@ -45,6 +45,10 @@ Nothing here is stored outside the models. The conventions are plain SysML v2:
 * a **mission requirement** is a requirement def with ``in`` parameters: it is
   checked with a system instance as subject and the totals of the mission as
   flown by that system as arguments;
+* **simulation evidence** is a verification usage typed by a mission
+  simulation and tagged ``#SimulationEvidence`` (metadata): its subject is the
+  system instance, its metadata attributes point at a stored result (see
+  ``evidence_text``);
 * a **mission simulation** is a def bound to an external analysis
   (``ToolExecution`` metadata) with a subject: its ``in`` parameters with a
   value are evaluated with a system instance as subject and sent to the
@@ -64,6 +68,7 @@ from typing import Any
 
 COMPONENT_TAG = "Component"
 ARCHITECTURE_TAG = "SystemArchitecture"
+EVIDENCE_TAG = "SimulationEvidence"
 BEHAVIOR_TAG = "Behavior"
 MISSION_TAG = "Mission"
 
@@ -144,10 +149,11 @@ def _attr(n: dict[str, Any], owner: str, idx: Index) -> dict[str, Any]:
     }
 
 
-def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]]) -> dict[str, Any]:
+def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: dict[str, str] | None = None) -> dict[str, Any]:
     """Catalog of a project from its combined graph.
 
-    ``file_models`` maps a source file name to ``{"id", "name"}`` of its model.
+    ``file_models`` maps a source file name to ``{"id", "name"}`` of its model;
+    ``texts`` maps it to its source, read for evidence metadata values.
     """
     idx = Index(graph)
 
@@ -261,6 +267,23 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]]) -> dict
         )
     for r in requirements:
         r["verifiedBy"] = [s["qualifiedName"] for s in simulations if r["qualifiedName"] in s["verifies"]]
+
+    # ---------------------------------------------------------- simulation evidence
+    sim_ids = {s["id"] for s in simulations}
+    evidence = []
+    for n in graph["nodes"]:
+        if n["kind"] != "verification" or EVIDENCE_TAG not in (n.get("metadata") or []) or n.get("typeId") not in sim_ids or not idx.in_package(n):
+            continue
+        subject = next((c for c in idx.children.get(n["id"], []) if c["kind"] == "subject"), None)
+        loc = n.get("loc") or {}
+        evidence.append(
+            {
+                **located(n),
+                "simulation": _qn(idx.nodes[n["typeId"]]),
+                "system": subject.get("value") if subject else None,
+                "values": metadata_values(_slice((texts or {}).get(loc.get("file") or ""), loc)),
+            }
+        )
 
     # ---------------------------------------------------------- architectures
     architectures = []
@@ -386,7 +409,7 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]]) -> dict
     tags = {
         n["name"]: _qn(n)
         for n in graph["nodes"]
-        if n["kind"] == "metadata def" and n["name"] in (COMPONENT_TAG, ARCHITECTURE_TAG, BEHAVIOR_TAG, MISSION_TAG)
+        if n["kind"] == "metadata def" and n["name"] in (COMPONENT_TAG, ARCHITECTURE_TAG, BEHAVIOR_TAG, MISSION_TAG, EVIDENCE_TAG)
     }
     return {
         "components": components,
@@ -397,9 +420,26 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]]) -> dict
         "missions": missions,
         "requirements": requirements,
         "simulations": simulations,
+        "evidence": evidence,
         "packages": packages,
         "tags": tags,
     }
+
+
+_META_VALUE = re.compile(r'(\w+)\s*=\s*"((?:[^"\\]|\\.)*)"')
+
+
+def _slice(source: str | None, loc: dict[str, Any]) -> str:
+    """The text an element spans."""
+    if not source or not loc.get("line"):
+        return ""
+    lines = source.splitlines(keepends=True)
+    return source[_offset(lines, loc["line"], loc["column"]) : _offset(lines, loc["endLine"], loc["endColumn"])]
+
+
+def metadata_values(text: str) -> dict[str, str]:
+    """String attribute values (``name = "value";``) written in an element's text."""
+    return {k: v.replace('\\"', '"') for k, v in _META_VALUE.findall(text)}
 
 
 # ------------------------------------------------------------------ text generation
@@ -551,6 +591,49 @@ def component_text(
                 raise CatalogError(f"{kind} {fname}: '{ftype}' is not a type name")
             inner.append(f"{kind} {fname}{' : ' + ftype if ftype else ''};")
     return [f"{head} {{", *_body(inner), "}"]
+
+
+EVIDENCE_PACKAGE = """package {name} {{
+    private import ScalarValues::*;
+
+    // Mission simulation results recorded as verification evidence. Each
+    // verification is the mission simulation of one system instance; the result
+    // itself (inputs, outputs, timeline) is stored outside the model, at uri.
+    metadata def SimulationEvidence {{
+        doc /* A recorded mission simulation result, stored outside the model. */
+        attribute resultId : String;      // the stored result
+        attribute uri : String;           // where to read it
+        attribute commitId : String;      // the model version that was simulated
+        attribute mission : String;       // qualified name of the mission flown
+        attribute verdict : String;       // holds when every requirement it verifies holds
+        attribute verdicts : String;      // requirement: verdict, ...
+        attribute recordedAt : String;
+    }}
+}}
+"""
+
+
+def _string(v: str) -> str:
+    return '"' + str(v).replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ") + '"'
+
+
+def evidence_text(
+    name: str, simulation_ref: str, subject: str, system_ref: str, values: dict[str, str], doc: str = "", tag_ref: str = EVIDENCE_TAG
+) -> list[str]:
+    """A recorded result: the simulation with its ``subject`` bound to the system
+    instance, and metadata pointing at the stored result."""
+    check_name(name)
+    check_name(subject, "subject")
+    for r in (simulation_ref, system_ref):
+        if not TYPE_RE.match(r):
+            raise CatalogError(f"'{r}' is not a qualified name")
+    inner = []
+    if doc.strip():
+        check_doc(doc)
+        inner.append(f"doc /* {doc.strip()} */")
+    inner.append(f"subject {subject} = {system_ref};")
+    inner += [f"metadata {tag_ref} {{", *_body([f"{k} = {_string(v)};" for k, v in values.items()]), "}"]
+    return [f"verification {name} : {simulation_ref} {{", *_body(inner), "}"]
 
 
 def flown_step(name: str, perform_qn: str, step_qn: str) -> str:

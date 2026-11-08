@@ -132,6 +132,34 @@ CREATE TABLE IF NOT EXISTS models.run (
 );
 CREATE INDEX IF NOT EXISTS run_model_idx ON models.run (model_id, created_at DESC);
 
+-- Mission simulation results, stored outside the SysML v2 repository: one row per
+-- mission flown by one system instance in one simulation, against the project's
+-- head commit at the time. Evidence recorded in the model refers to a row by id.
+CREATE TABLE IF NOT EXISTS models.simulation_result (
+    id            UUID PRIMARY KEY,
+    run_id        UUID NOT NULL,
+    project_id    UUID NOT NULL REFERENCES models.project(id) ON DELETE CASCADE,
+    commit_id     UUID REFERENCES models.commits(id) ON DELETE SET NULL,
+    mission_type  TEXT NOT NULL,
+    mission       TEXT NOT NULL,               -- qualified name, or 'draft'
+    draft_steps   JSONB,                       -- the steps of an unsaved mission
+    system        TEXT NOT NULL,               -- qualified name of the system instance
+    simulation    TEXT NOT NULL,               -- qualified name of the simulation def
+    tool_name     TEXT NOT NULL,
+    tool_version  TEXT,
+    input_hash    TEXT NOT NULL,               -- of the tool, its version and every input sent
+    inputs        JSONB NOT NULL,              -- everything sent to the tool, flown steps included
+    outputs       JSONB,
+    units         JSONB NOT NULL DEFAULT '{}'::jsonb,
+    verdicts      JSONB NOT NULL DEFAULT '{}'::jsonb,
+    verification  JSONB NOT NULL DEFAULT '{}'::jsonb,
+    error         TEXT,
+    reused_from   UUID,                        -- outputs taken from an earlier result with the same inputs
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS simulation_result_pair_idx ON models.simulation_result (project_id, mission, system, created_at DESC);
+CREATE INDEX IF NOT EXISTS simulation_result_hash_idx ON models.simulation_result (tool_name, input_hash);
+
 -- Demo projects already seeded once (so a deleted demo is not re-created)
 CREATE TABLE IF NOT EXISTS models.seed (
     name       TEXT PRIMARY KEY,
