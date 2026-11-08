@@ -614,3 +614,14 @@ td.nowrap { white-space: nowrap; }
 /* ------------------------------------------------------------ controllability */
 .control { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
 .control .multiples { grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+
+/* ------------------------------------------------------------ specification */
+.spec-scroll { max-height: calc(100vh - 330px); overflow: auto; }
+.spec-table th { position: sticky; top: 0; background: var(--surface); z-index: 1; }
+.spec-table .spec-id { white-space: nowrap; width: 1%; color: var(--muted); }
+.spec-table .spec-name { min-width: 280px; }
+.spec-table .spec-col { text-align: center; width: 1%; white-space: nowrap; }
+.spec-table tr.spec-statement td { background: var(--surface-2); }
+.spec-table .spec-doc { max-width: 420px; white-space: normal; }
+.spec-toggle { padding: 0 4px 0 0; font-size: 11px; }
+.pill.spec-explicit { margin-left: 6px; font-size: 10.5px; padding: 0 6px; }

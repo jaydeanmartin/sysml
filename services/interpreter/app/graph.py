@@ -398,6 +398,7 @@ class GraphBuilder:
             "kind": kind,
             "metatype": t,
             "name": self._name(el),
+            "shortName": el.get("declaredShortName"),
             "qualifiedName": el.get("qualifiedName"),
             "owner": self._node_owner(el),
             "loc": self._loc(el),
@@ -541,6 +542,11 @@ class GraphBuilder:
         if kind == "verify" and req not in self.nodes:
             # a verified requirement declared by its definition: the edge goes to the def
             req = next((r for r in _refs(el.get("type")) if r in self.nodes), req)
+        if req not in self.nodes:
+            # a nested requirement written as a chain, e.g. `satisfy parent.child by x`
+            chain = self.by_id.get(req or "")
+            if chain and chain.get("chainingFeature"):
+                req = _refs(chain["chainingFeature"])[-1]
         by = _ref(el.get("subject")) or _ref(el.get("satisfyingFeature"))
         if kind == "verify":
             by = self._context(el)

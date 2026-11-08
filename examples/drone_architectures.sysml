@@ -83,37 +83,8 @@ package DroneArchitectures {
     }
 
     // ---------------------------------------------------------- requirements
-    // Checked for every system instance by the Configurator (subject: DeliveryDrone).
-    requirement def ThrustToWeightRequirement {
-        doc /* Full-throttle thrust shall be at least twice the weight at maximum takeoff mass. */
-        subject drone : DeliveryDrone;
-        require constraint { drone.thrustToWeight >= 2.0 }
-    }
-    requirement def EnduranceRequirement {
-        doc /* The drone shall hover for at least 15 minutes with a full payload, keeping a 20 % battery reserve. */
-        subject drone : DeliveryDrone;
-        require constraint { drone.endurance >= 15 }
-    }
-    requirement def FrameLoadRequirement {
-        doc /* The takeoff mass shall not exceed the frame's rated maximum takeoff mass. */
-        subject drone : DeliveryDrone;
-        require constraint { drone.takeoffMass <= drone.airframe.maxTakeoffMass }
-    }
-    requirement def PropellerClearanceRequirement {
-        doc /* Adjacent propeller tips shall not overlap. */
-        subject drone : DeliveryDrone;
-        require constraint { drone.propClearance >= 0 }
-    }
-    requirement def PropellerSizeRequirement {
-        doc /* The propeller shall be no larger than the motor's largest rated propeller. */
-        subject drone : DeliveryDrone;
-        require constraint { drone.propellers.diameter#(1) <= drone.motors.maxPropDiameter#(1) }
-    }
-    requirement def BatteryPowerRequirement {
-        doc /* The battery shall supply every motor at full throttle. */
-        subject drone : DeliveryDrone;
-        require constraint { drone.peakPower <= drone.battery.maxPower }
-    }
+    // In the DroneRequirements model: requirement types with parameters, and the
+    // specification of instances they are checked with.
 
     // ---------------------------------------------------------- system instances
     // Created and edited from the Configurator tab.

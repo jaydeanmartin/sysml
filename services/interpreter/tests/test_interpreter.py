@@ -198,3 +198,21 @@ def test_verification_objective_verifies_requirement_defs():
     r = client.post("/parse", json={"files": [{"name": "V.sysml", "text": src}]}).json()
     assert not [d for d in r["diagnostics"] if d["severity"] == "error"]
     assert [(e["source"], e["target"]) for e in r["graph"]["edges"] if e["kind"] == "verify"] == [("V__Sim", "V__EnergyReq")]
+
+
+def test_requirement_ids_and_satisfy_of_a_nested_requirement():
+    src = """package S {
+        private import ScalarValues::*;
+        part def M { attribute eff : Real; }
+        part m1 : M { attribute :>> eff = 0.9; }
+        requirement def Eff { subject m : M; attribute minimum : Real; require constraint { m.eff >= minimum } }
+        requirement <'STK-1'> parent {
+            requirement <'CMP-1'> child : Eff { attribute :>> minimum = 0.8; }
+        }
+        satisfy parent.child by m1;
+    }"""
+    r = client.post("/parse", json={"files": [{"name": "S.sysml", "text": src}]}).json()
+    assert not [d for d in r["diagnostics"] if d["severity"] == "error"]
+    nodes = {n["id"]: n for n in r["graph"]["nodes"]}
+    assert nodes["S__parent"]["shortName"] == "STK-1" and nodes["S__parent__child"]["shortName"] == "CMP-1"
+    assert [(e["source"], e["target"]) for e in r["graph"]["edges"] if e["kind"] == "satisfy"] == [("S__m1", "S__parent__child")]

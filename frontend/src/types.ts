@@ -385,6 +385,8 @@ export interface Catalog {
   requirements: CatalogRequirement[];
   /** defs bound to an external analysis (ToolExecution) with a system subject */
   simulations: MissionSimulationDef[];
+  /** the requirement hierarchy: statements and instances, in document order */
+  specification: SpecRequirement[];
   packages: { qualifiedName: string; modelId: string | null; modelName: string | null; loc: Loc | null }[];
   tags: Record<string, string>;
   diagnostics: Diagnostic[];
@@ -738,4 +740,39 @@ export interface TuneResult {
   slot: string | null;
   component: string | null;
   current: { qualifiedName: string; values: Record<string, string> } | null;
+}
+
+/** a requirement usage of the specification: a statement, or an instance of a requirement type */
+export interface SpecRequirement extends Located {
+  shortName: string | null;
+  /** the statement it is under */
+  parent: string | null;
+  /** its requirement def (null: a statement) */
+  type: string | null;
+  typeId: string | null;
+  isAbstractType: boolean;
+  level: "system" | "component" | "statement" | "other";
+  subject: string | null;
+  subjectTypeId: string | null;
+  subjectType: string | null;
+  /** the type's attributes, with the value this instance (bound) or the type gives them */
+  parameters: (CatalogAttribute & { bound: boolean })[];
+  /** in parameters of the type: measured values a verification supplies */
+  measured: string[];
+  constraints: { kind: string; text: string }[];
+  satisfiedBy: string[];
+  /** system or component instances it applies to */
+  appliesTo: string[];
+  /** true: named by satisfy relations; false: every instance its subject type fits */
+  explicit: boolean;
+}
+
+export type SpecVerdict = "holds" | "fails" | "error" | "unverified";
+
+export interface RequirementCheck {
+  /** requirement -> subject -> verdict, for instances */
+  verdicts: Record<string, Record<string, SpecVerdict>>;
+  /** the same for every requirement, statements rolled up from what is under them */
+  rollup: Record<string, Record<string, SpecVerdict>>;
+  errors: string[];
 }

@@ -18,13 +18,14 @@ import { HistoryPanel } from "./panels/HistoryPanel";
 import { LibraryPanel } from "./panels/LibraryPanel";
 import { MissionsPanel } from "./panels/MissionsPanel";
 import { GeometryPanel } from "./panels/GeometryPanel";
+import { SpecificationPanel } from "./panels/SpecificationPanel";
 import { RequirementsPanel } from "./panels/RequirementsPanel";
 import { SNIPPETS } from "./snippets";
 import { useTheme, type ThemePref } from "./theme";
 import type { Catalog, CatalogChange, Diagnostic, GNode, Graph, Loc, Located, Model, ModelSummary, ModelTemplate, Project, Run, RunRequest } from "./types";
 
-type Tab = "diagram" | "library" | "configurator" | "missions" | "geometry" | "requirements" | "execute" | "analyses" | "history";
-const CATALOG_TABS: Tab[] = ["library", "configurator", "missions", "geometry"];
+type Tab = "diagram" | "library" | "configurator" | "missions" | "geometry" | "specification" | "requirements" | "execute" | "analyses" | "history";
+const CATALOG_TABS: Tab[] = ["library", "configurator", "missions", "geometry", "specification"];
 // [panel, label, icon, tooltip] in sidebar order
 const PANELS: [Tab, string, string, string][] = [
   ["diagram", "Diagram", "◫", "Structure, interconnection, requirement and behavior diagrams"],
@@ -32,6 +33,7 @@ const PANELS: [Tab, string, string, string][] = [
   ["configurator", "Configurator", "⚙", "Configure system instances from catalog components"],
   ["missions", "Missions", "⚑", "Plan missions as ordered behaviors and check them against system instances"],
   ["geometry", "3-D", "◈", "3-D geometry of system instances, generated from their components"],
+  ["specification", "Specification", "☰", "Requirement hierarchy: statements and instances of requirement types, checked for every system and component"],
   ["requirements", "Requirements", "✓", "Requirements, satisfy relations and verdicts"],
   ["execute", "Execute", "▶", "Run calcs, analyses, actions and state machines"],
   ["analyses", "Analyses", "ƒ", "REST analyses the model can call"],
@@ -623,6 +625,8 @@ export default function App() {
               <>
                 {tab === "library" ? (
                   <LibraryPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
+                ) : tab === "specification" ? (
+                  <SpecificationPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
                 ) : tab === "geometry" ? (
                   <GeometryPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
                 ) : tab === "missions" ? (

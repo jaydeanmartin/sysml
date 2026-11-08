@@ -309,3 +309,41 @@ def test_system_simulations_and_their_requirements():
     assert arch["systemRequirements"] == ["B::Stable", "B::Climb"]
     assert arch["missionRequirements"] == ["B::Energy"]
     assert cat["tags"]["SystemSimulation"] == "B::SystemSimulation"
+
+
+def test_specification_hierarchy_parameters_and_applicability():
+    nodes = GRAPH["nodes"] + [
+        # requirement types on an abstract system and an abstract component
+        node("R", "package", "R"),
+        node("R__Weight", "requirement def", "Weight", "R", isAbstract=True),
+        node("R__Weight__car", "subject", "car", "R__Weight", typeId="A__Car"),
+        node("R__Weight__limit", "attribute", "limit", "R__Weight", typeName="MassValue"),
+        node("R__Weight__margin", "attribute", "margin", "R__Weight", value="0"),
+        node("R__GearCount", "requirement def", "GearCount", "R", isAbstract=True),
+        node("R__GearCount__box", "subject", "box", "R__GearCount", typeId="L__Gearbox"),
+        node("R__GearCount__minimum", "attribute", "minimum", "R__GearCount"),
+        # the specification: a statement holding instances
+        node("R__Spec", "package", "Spec", "R"),
+        node("R__Spec__top", "requirement", "top", "R__Spec", shortName="STK-1", doc="Cars shall be good."),
+        node("R__Spec__top__light", "requirement", "light", "R__Spec__top", shortName="SYS-1", typeId="R__Weight", typeName="Weight"),
+        node("R__Spec__top__light__limit", "attribute", "limit", "R__Spec__top__light", value="1500 [SI::kg]"),
+        node("R__Spec__top__lighter", "requirement", "lighter", "R__Spec__top", shortName="SYS-2", typeId="R__Weight", typeName="Weight"),
+        node("R__Spec__top__gears", "requirement", "gears", "R__Spec__top", shortName="CMP-1", typeId="R__GearCount", typeName="GearCount"),
+        # a verify usage in a verification objective is not part of the specification
+        node("R__Test", "verification def", "Test", "R"),
+        node("R__Test__obj", "requirement", "obj", "R__Test"),
+        node("R__Test__obj__light", "requirement", "light", "R__Test__obj", typeId="R__Weight"),
+    ]
+    edges = GRAPH["edges"] + [{"id": "s9", "kind": "satisfy", "source": "A__base", "target": "R__Spec__top__lighter"}]
+    cat = catalog.build({"nodes": nodes, "edges": edges}, FILES)
+    spec = {r["name"]: r for r in cat["specification"]}
+    assert list(spec) == ["top", "light", "lighter", "gears"]
+    top, light, lighter, gears = spec["top"], spec["light"], spec["lighter"], spec["gears"]
+    assert (top["level"], top["type"], top["parent"], top["shortName"]) == ("statement", None, None, "STK-1")
+    assert light["parent"] == "R::Spec::top" and light["type"] == "R::Weight" and light["isAbstractType"]
+    params = {p["name"]: (p["value"], p["bound"]) for p in light["parameters"]}
+    assert params == {"limit": ("1500 [SI::kg]", True), "margin": ("0", False)}
+    # applicability: every system the subject type fits, or what satisfy names
+    assert light["level"] == "system" and light["appliesTo"] == ["A::base"] and not light["explicit"]
+    assert lighter["explicit"] and lighter["appliesTo"] == ["A::base"]
+    assert gears["level"] == "component" and gears["appliesTo"] == ["L::Cat::m6"]  # a Manual is a Gearbox

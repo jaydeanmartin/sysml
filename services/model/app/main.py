@@ -303,6 +303,7 @@ DEMOS = [
         [
             ("DroneLibrary", "drone_library.sysml", "Frames, batteries, motors, propellers and payload modules, with their catalog instances"),
             ("DroneArchitectures", "drone_architectures.sysml", "Quad, hexa and octo architectures, sizing requirements and configured drones"),
+            ("DroneRequirements", "drone_requirements.sysml", "Requirement types with parameters, and the specification hierarchy of their instances"),
             ("DroneMissions", "drone_missions.sysml", "Behavior library and delivery missions built from ordered behaviors"),
             ("DroneControl", "drone_control.sysml", "Controllability: flight-controller tuning and closed-loop manoeuvre simulation"),
         ],
@@ -1781,6 +1782,54 @@ def tune_system(project_id: uuid.UUID, body: TuneIn) -> dict[str, Any]:
         "slot": slot["name"] if slot else None, "component": slot["type"] if slot else None,
         "current": {"qualifiedName": current["qualifiedName"], "values": current["values"]} if current else None,
     }
+
+
+# ------------------------------------------------------------------ the specification
+@app.post("/projects/{project_id}/requirements/check")
+def check_requirements(project_id: uuid.UUID) -> dict[str, Any]:
+    """Check the specification. Every requirement instance whose type needs no
+    measured values is evaluated as ``Instance(subject)`` for each system or
+    component instance it applies to, in one evaluate run. Instances that need
+    measured values are left to the simulations that verify them. Statements
+    are rolled up: for a subject, a statement holds when every instance under it
+    that applies does, fails when one fails.
+    Returns ``verdicts`` and ``rollup``, both requirement -> subject -> verdict."""
+    cat, _ = _project_catalog(project_id)
+    spec = cat["specification"]
+    exprs: dict[tuple[str, str], str] = {}
+    for r in spec:
+        if r["type"] and not r["measured"]:
+            for subj in r["appliesTo"]:
+                exprs[(r["qualifiedName"], subj)] = f"{r['qualifiedName']}({subj})"
+    got, errors = _evaluate(project_id, list(exprs.values()))
+    verdicts: dict[str, dict[str, str]] = {}
+    for (rq, subj), e in exprs.items():
+        v = got.get(e)
+        verdicts.setdefault(rq, {})[subj] = "holds" if v == "true" else "fails" if v == "false" else "error"
+    for r in spec:
+        if r["type"] and r["measured"]:  # a simulation verifies it (missions, control)
+            verdicts[r["qualifiedName"]] = {subj: "unverified" for subj in r["appliesTo"]}
+    children: dict[str, list[str]] = {}
+    for r in spec:
+        if r["parent"]:
+            children.setdefault(r["parent"], []).append(r["qualifiedName"])
+    rank = {"fails": 3, "error": 2, "unverified": 1, "holds": 0}
+    rollup: dict[str, dict[str, str]] = {}
+
+    def roll(q: str) -> dict[str, str]:
+        if q in rollup:
+            return rollup[q]
+        out = dict(verdicts.get(q, {}))
+        for c in children.get(q, []):
+            for subj, v in roll(c).items():
+                if subj not in out or rank[v] > rank[out[subj]]:
+                    out[subj] = v
+        rollup[q] = out
+        return out
+
+    for r in spec:
+        roll(r["qualifiedName"])
+    return {"verdicts": verdicts, "rollup": rollup, "errors": errors}
 
 
 @app.delete("/projects/{project_id}/catalog/elements")

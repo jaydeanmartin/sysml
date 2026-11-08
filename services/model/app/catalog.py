@@ -54,6 +54,12 @@ Nothing here is stored outside the models. The conventions are plain SysML v2:
   attributes (``command``, ``step``, ``rate``, ``hold``) say what a system
   simulation flies, its ``in`` parameters which of the test's results it is
   checked with;
+* the **specification** is the hierarchy of requirement usages in packages:
+  *statements* (no type, no constraint) hold more statements or *instances*
+  (a requirement def, usually abstract, with its parameters, the attributes,
+  set). An instance applies to the elements its ``satisfy`` relations name;
+  with none, to every system instance (or component instance) its subject type
+  fits. A statement holds when every instance under it that applies does;
 * **simulation evidence** is a verification usage typed by a mission
   simulation and tagged ``#SimulationEvidence`` (metadata): its subject is the
   system instance, its metadata attributes point at a stored result (see
@@ -286,6 +292,59 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
         r["verifiedBy"] = [s["qualifiedName"] for s in simulations if r["qualifiedName"] in s["verifies"]]
     system_verified = {q for s in simulations if s["scope"] == "system" for q in s["verifies"]}
 
+    # ---------------------------------------------------------- specification: requirement usages in packages
+    req_by_id = {r["id"]: r for r in requirements}
+    satisfied: dict[str, list[str]] = {}
+    for e in graph["edges"]:
+        if e["kind"] == "satisfy" and e["source"] in idx.nodes and e["target"] in idx.nodes:
+            satisfied.setdefault(e["target"], []).append(_qn(idx.nodes[e["source"]]))
+
+    def in_spec(n: dict[str, Any]) -> bool:
+        """A requirement usage in a package, or nested in such a usage (not in an objective)."""
+        owner = idx.nodes.get(n.get("owner") or "")
+        while owner and owner["kind"] == "requirement":
+            owner = idx.nodes.get(owner.get("owner") or "")
+        return bool(owner and owner["kind"] == "package")
+
+    arch_lineages = [idx.ancestors(a) for a in arch_ids]
+    specification = []
+    for n in graph["nodes"]:
+        if n["kind"] != "requirement" or not in_spec(n):
+            continue
+        owner = idx.nodes.get(n.get("owner") or "")
+        tdef = req_by_id.get(n.get("typeId") or "")
+        own_attrs = {c["name"]: c["value"] for c in idx.children.get(n["id"], []) if c["kind"] == "attribute" and c.get("value")}
+        subject_type = tdef["subjectTypeId"] if tdef else None
+        if subject_type and any(subject_type in lin for lin in arch_lineages):
+            level = "system"
+        elif subject_type and (subject_type in component_ids or any(subject_type in idx.ancestors(c) for c in component_ids)):
+            level = "component"
+        else:
+            level = "statement" if not tdef else "other"
+        specification.append(
+            {
+                **located(n),
+                "shortName": n.get("shortName"),
+                "parent": _qn(owner) if owner and owner["kind"] == "requirement" else None,
+                "type": tdef["qualifiedName"] if tdef else (n.get("typeName") or None),
+                "typeId": n.get("typeId"),
+                "isAbstractType": bool(tdef and idx.nodes[tdef["id"]].get("isAbstract")),
+                "level": level,
+                "subject": tdef["subject"] if tdef else None,
+                "subjectTypeId": subject_type,
+                "subjectType": _qn(idx.nodes.get(subject_type or "")) if subject_type else None,
+                # parameters: the type's attributes, with the values this instance (or the type) gives them
+                "parameters": [
+                    {**_attr(a, o, idx), "value": own_attrs.get(a["name"], a.get("value")), "bound": a["name"] in own_attrs}
+                    for a, o in (idx.features(tdef["id"], ("attribute",)) if tdef else [])
+                ],
+                # measured values a verification supplies (an in parameter of the type)
+                "measured": tdef["params"] if tdef else [],
+                "constraints": (idx.nodes[tdef["id"]].get("constraints") or []) if tdef else (n.get("constraints") or []),
+                "satisfiedBy": satisfied.get(n["id"], []),
+            }
+        )
+
     # ---------------------------------------------------------- simulation evidence
     sim_ids = {s["id"] for s in simulations}
     evidence = []
@@ -427,6 +486,20 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
             steps.append({"name": c["name"], "behavior": _qn(behavior) if c.get("typeId") in behavior_ids else None, "values": values})
         missions.append({**located(n), "missionTypeId": n["typeId"], "missionType": _qn(idx.nodes[n["typeId"]]), "steps": steps})
 
+    # applicability: what each instance's satisfy relations name, else every system
+    # (component) instance its subject type fits
+    for r in specification:
+        if r["satisfiedBy"]:
+            r["appliesTo"], r["explicit"] = list(r["satisfiedBy"]), True
+        elif r["level"] == "system":
+            r["appliesTo"] = [c["qualifiedName"] for c in configurations if r["subjectTypeId"] in idx.ancestors(c["architectureId"])]
+            r["explicit"] = False
+        elif r["level"] == "component":
+            r["appliesTo"] = [i["qualifiedName"] for i in instances if i["kind"] == "part" and r["subjectTypeId"] in idx.ancestors(i["componentId"])]
+            r["explicit"] = False
+        else:
+            r["appliesTo"], r["explicit"] = [], False
+
     packages = []
     for n in graph["nodes"]:
         if n["kind"] == "package":
@@ -447,6 +520,7 @@ def build(graph: dict[str, Any], file_models: dict[str, dict[str, str]], texts: 
         "requirements": requirements,
         "simulations": simulations,
         "evidence": evidence,
+        "specification": specification,
         "packages": packages,
         "tags": tags,
     }
