@@ -1,13 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
-import type { CatalogChange, Component, FlownMission, Mission, MissionEvaluation, MissionType, StepRequest, Verification } from "../types";
+import type { CatalogChange, Component, EvidenceRecord, FlownMission, Located, Mission, MissionEvaluation, MissionType, StepRequest, Verification } from "../types";
 import { NAME_RE, errorText, partText, placeholder, ref, short, type CatalogPanelProps } from "./catalogUtil";
 import { MissionSimulation } from "./MissionSimulation";
-import { fillDoc, missingValues, ownValues, ReqId, reqId, RequirementValues, requirementLines, walkUsages } from "./RequirementValues";
-
-/** the draft's values for one requirement usage, by attribute */
-const ownValuesOf = (draft: { requirements: Record<string, string> } | null, path: string) =>
-  Object.fromEntries(Object.entries(draft?.requirements || {}).filter(([k]) => k.slice(0, k.lastIndexOf(".")) === path).map(([k, v]) => [k.slice(k.lastIndexOf(".") + 1), v]));
+import { StoredResults } from "./StoredResults";
 
 interface Draft {
   name: string;
@@ -15,8 +11,6 @@ interface Draft {
   package: string;
   /** in order: a behavior (abstract #Behavior action def) and its quantities */
   steps: StepRequest[];
-  /** requirement value ("usage.attribute") -> number */
-  requirements: Record<string, string>;
   /** qualified name of the mission being edited; null for a new one */
   replace: string | null;
 }
@@ -62,6 +56,10 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
   const [busy, setBusy] = useState(false);
   const [evaluating, setEvaluating] = useState(false);
   const [evals, setEvals] = useState<Record<string, Evaluation>>({});
+  // simulation evidence recorded in the model, with whether each is still current
+  const [evidence, setEvidence] = useState<EvidenceRecord[]>([]);
+  const [tagOnRecord, setTagOnRecord] = useState(false);
+  const [recordNote, setRecordNote] = useState<string | null>(null);
 
   const types = catalog?.missionTypes || [];
   const mtype = types.find((t) => t.qualifiedName === typeQn) || types[0];
@@ -98,14 +96,13 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
     const base = lowerFirst(t.name);
     let n = 1;
     while (catalog?.missions.some((m) => m.name === `${base}${n}`)) n++;
-    return { name: `${base}${n}`, doc: "", package: "", steps: [], requirements: {}, replace: null };
+    return { name: `${base}${n}`, doc: "", package: "", steps: [], replace: null };
   };
   const fromMission = (m: Mission): Draft => ({
     name: m.name,
     doc: m.doc || "",
     package: m.package || "",
     steps: m.steps.filter((s) => s.behavior).map((s) => ({ behavior: s.behavior!, values: { ...s.values } })),
-    requirements: ownValues(m.requirementUsages),
     replace: m.qualifiedName,
   });
 
@@ -153,7 +150,6 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
         doc: draft.doc,
         package: draft.replace ? null : draft.package || null,
         steps: clean(draft.steps),
-        requirements: draft.requirements,
         replace: draft.replace,
       })
     );
@@ -176,10 +172,8 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
   };
 
   const current = draft?.replace ? missions.find((m) => m.qualifiedName === draft.replace) : undefined;
-  // requirement values change the verdicts as the steps do
-  const draftKey = draft ? stepsKey(draft.steps) + JSON.stringify(draft.requirements) : "";
-  const stepsChanged = !current || draftKey !== stepsKey(fromMission(current).steps) + JSON.stringify(ownValues(current.requirementUsages));
-  const reqMissing = mtype && draft ? missingValues(mtype.requirementUsages, draft.requirements) : [];
+  const draftKey = draft ? stepsKey(draft.steps) : "";
+  const stepsChanged = !current || draftKey !== stepsKey(fromMission(current).steps);
   const incomplete = draft ? draft.steps.some((s) => quantities(s.behavior).some((q) => !s.values[q.name]?.trim())) : false;
 
   /** One evaluation: every mission (and the draft, if it is not a saved mission
@@ -190,7 +184,7 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
     setEvaluating(true);
     const sendDraft = stepsChanged && draft.steps.length > 0 && !incomplete;
     try {
-      const res = await api.evaluateMissions(projectId, mtype.qualifiedName, sendDraft ? clean(draft.steps) : null, sendDraft ? draft.requirements : null);
+      const res = await api.evaluateMissions(projectId, mtype.qualifiedName, sendDraft ? clean(draft.steps) : null);
       setEvals((m) => ({ ...m, [mtype.qualifiedName]: { ...res, at: new Date().toLocaleTimeString(), draftKey: sendDraft ? draftKey : null } }));
     } catch (e) {
       setEvals((m) => ({ ...m, [mtype.qualifiedName]: { missionType: mtype.qualifiedName, totals, missions: {}, errors: [errorText(e)], at: new Date().toLocaleTimeString(), draftKey: null } }));
@@ -198,6 +192,15 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
       setEvaluating(false);
     }
   };
+
+  // evidence status depends on the model (catalog) and on the newest stored results (evaluations)
+  useEffect(() => {
+    let stale = false;
+    api.evidence(projectId).then((e) => !stale && setEvidence(e)).catch(() => !stale && setEvidence([]));
+    return () => {
+      stale = true;
+    };
+  }, [projectId, catalog, evals]);
 
   // the catalog is re-read after every save: refresh an evaluation already on screen
   useEffect(() => {
@@ -228,22 +231,18 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
     mtype && draft
       ? partText(
           `action ${draft.name || "…"} : ${ref(mtype.qualifiedName, scope)}`,
-          [
-            ...(draft.steps.length
-              ? [
-                  "first start;",
-                  ...draft.steps.map((s, i) => {
-                    const body = quantities(s.behavior)
-                      .filter((q) => s.values[q.name]?.trim())
-                      .map((q) => `attribute :>> ${q.name} = ${s.values[q.name].trim()};`);
-                    return `then action ${names[i]} : ${ref(s.behavior, scope)}${body.length ? ` { ${body.join(" ")} }` : ";"}`;
-                  }),
-                  "then done;",
-                ]
-              : []),
-            // the mission's requirement values follow its steps
-            ...requirementLines(draft.requirements, mtype.requirementUsages),
-          ],
+          draft.steps.length
+            ? [
+                "first start;",
+                ...draft.steps.map((s, i) => {
+                  const body = quantities(s.behavior)
+                    .filter((q) => s.values[q.name]?.trim())
+                    .map((q) => `attribute :>> ${q.name} = ${s.values[q.name].trim()};`);
+                  return `then action ${names[i]} : ${ref(s.behavior, scope)}${body.length ? ` { ${body.join(" ")} }` : ";"}`;
+                }),
+                "then done;",
+              ]
+            : [],
           draft.doc
         )
       : "";
@@ -259,15 +258,23 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
   const flyerQn = flyer && draftResults?.[flyer] ? flyer : Object.keys(draftResults || {}).find((k) => !draftResults![k].problems.length) || null;
   const flight = flyerQn ? draftResults?.[flyerQn] : undefined;
   const timeTotal = totals[0];
-  const reqIds: Record<string, string | null> = Object.fromEntries([
-    ...catalog.requirements.map((r) => [r.qualifiedName, r.shortId]),
-    ...(mtype ? walkUsages(mtype.requirementUsages).map((u) => [`${mtype.qualifiedName}.${u.path}`, reqId(u)]) : []),
-  ]);
-  const reqDocs = Object.fromEntries([
-    ...catalog.requirements.map((r) => [r.qualifiedName, r.doc || ""]),
-    // the mission type's own requirement usages are checked under "MissionType.usage"
-    ...(mtype ? walkUsages(mtype.requirementUsages).map((u) => [`${mtype.qualifiedName}.${u.path}`, fillDoc(u.doc, { ...u.values, ...ownValuesOf(draft, u.path) })]) : []),
-  ]);
+  const reqDocs = Object.fromEntries([...catalog.requirements, ...catalog.missionRequirements].map((r) => [r.qualifiedName, r.doc || ""]));
+  // mission requirement instances, labelled by their id
+  const reqLabels = Object.fromEntries(catalog.missionRequirements.map((r) => [r.qualifiedName, `${r.shortName ? `${r.shortName} ` : ""}${r.name}`]));
+  const assigned = new Set(current && !stepsChanged ? current.assignedTo : []);
+  const assign = async (system: string) => {
+    if (!current) return;
+    const next = current.assignedTo.includes(system) ? current.assignedTo.filter((q) => q !== system) : [...current.assignedTo, system];
+    await run(() => api.assignMission(projectId, current.qualifiedName, next));
+  };
+  // what the mission requires of the drones flying it: its type's objective, then its own
+  const missionReqs = catalog.missionRequirements.filter((r) => mtype.requirements.includes(r.qualifiedName) || (current && current.requirements.includes(r.qualifiedName)));
+  const savedMission = current && !stepsChanged ? current.qualifiedName : null;
+  const record = async (resultId: string) => {
+    setRecordNote(null);
+    const r = await run(() => api.recordEvidence(resultId, tagOnRecord));
+    if (r) setRecordNote(`Recorded ${short(r.qualifiedName)} in ${r.modelName} (version ${r.version})${(r as { tag?: string | null }).tag ? `; tagged ${(r as { tag?: string }).tag}` : ""}.`);
+  };
 
   return (
     <div className="panel lib">
@@ -464,36 +471,80 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
                   {!stepTypes.length && <span className="muted small">No behaviors yet: declare #Behavior action defs in the Library tab.</span>}
                 </div>
 
-                <RequirementValues usages={mtype.requirementUsages} values={draft.requirements} what="mission" onChange={(requirements) => setDraft({ ...draft, requirements })} />
                 <code className="block">{preview}</code>
-                {draftResults && <VerificationTable results={draftResults} docs={reqDocs} ids={reqIds} />}
+                {current && !stepsChanged && (
+                  <div className="assign-row">
+                    <span className="small muted" title="Allocations of the mission to system instances: the mission's requirements apply to these drones">
+                      Assigned to
+                    </span>
+                    {catalog.configurations.map((c) => (
+                      <button key={c.id} className={`chip-toggle${current.assignedTo.includes(c.qualifiedName) ? " on" : ""}`} disabled={busy} aria-pressed={current.assignedTo.includes(c.qualifiedName)} onClick={() => assign(c.qualifiedName)}>
+                        {c.name}
+                      </button>
+                    ))}
+                  </div>
+                )}
+                {missionReqs.length > 0 && (
+                  <div className="small">
+                    <span className="muted">Requires of the drones flying it: </span>
+                    {missionReqs.map((r, i) => (
+                      <span key={r.qualifiedName} title={`${r.doc || ""}\n${short(r.type)}: ${r.parameters.filter((p) => p.bound).map((p) => `${p.name} ${p.value}`).join(", ")}${r.owner === mtype.qualifiedName ? `\nfrom ${mtype.name}'s objective` : "\nthis mission's own"}`}>
+                        {i > 0 && " · "}
+                        <span className="mono">{r.shortName}</span> {r.name}
+                        {r.owner !== mtype.qualifiedName && <span className="pill spec-explicit">own</span>}
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {draftResults && (
+                  <>
+                    <VerificationTable
+                      labels={reqLabels}
+                      assigned={assigned}
+                      results={draftResults}
+                      docs={reqDocs}
+                      mission={savedMission}
+                      evidence={evidence}
+                      busy={busy}
+                      onRecord={record}
+                      onOpen={onOpen}
+                    />
+                    {Object.values(draftResults).some((r) => Object.keys(r.simulations || {}).length) && (
+                      <div className="row-between">
+                        <label className="inline small" title="Also tag the project commit that was simulated, so the verified version can be found later">
+                          <input type="checkbox" checked={tagOnRecord} onChange={(e) => setTagOnRecord(e.target.checked)} /> tag the simulated version when recording
+                        </label>
+                        {recordNote && <span className="hint">{recordNote}</span>}
+                      </div>
+                    )}
+                  </>
+                )}
                 <div className="row-end">
                   {incomplete && <span className="hint">Every step needs all its quantities.</span>}
-                  {reqMissing.length > 0 && <span className="hint">State the requirement values: {reqMissing.join(", ")}.</span>}
                   {!incomplete && !draftResults && draft.steps.length > 0 && <span className="hint">Evaluate to fly it with every system instance.</span>}
                   {draft.replace && changed && <button onClick={() => current && setDraft(fromMission(current))}>Revert</button>}
-                  <button className="primary" disabled={busy || !NAME_RE.test(draft.name) || !changed || incomplete || reqMissing.length > 0} onClick={save}>
+                  <button className="primary" disabled={busy || !NAME_RE.test(draft.name) || !changed || incomplete} onClick={save}>
                     {busy ? "Saving…" : draft.replace ? "Save mission" : "Create mission"}
                   </button>
                 </div>
               </div>
             )}
 
-            {draft && catalog.simulations.length > 0 && (
+            {draft && catalog.simulations.some((s) => s.scope !== "system") && (
               <MissionSimulation
                 projectId={projectId}
                 missionType={mtype.qualifiedName}
                 mission={current && !stepsChanged ? current.qualifiedName : null}
                 draft={current && !stepsChanged ? null : clean(draft.steps)}
-                draftRequirements={current && !stepsChanged ? null : draft.requirements}
                 label={current && !stepsChanged ? current.name : "draft"}
                 systems={catalog.configurations}
-                simulations={catalog.simulations}
+                simulations={catalog.simulations.filter((s) => s.scope !== "system")}
                 ensureSaved={ensureSaved}
                 refreshKey={catalog}
                 disabled={!draft.steps.length || incomplete}
               />
             )}
+            {savedMission && <StoredResults projectId={projectId} mission={savedMission} evidence={evidence} refreshKey={`${evaluation?.at}|${catalog.missions.length}|${evidence.length}`} />}
 
             <div className="section-title row-between">
               <span>Compare missions</span>
@@ -523,8 +574,10 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
                         <td className="num small">{m.steps.length}</td>
                         {fliers.map((c) => {
                           const r = evaluation?.missions[m.qualifiedName]?.[c.qualifiedName];
+                          const isAssigned = m.assignedTo.includes(c.qualifiedName);
                           return (
-                            <td key={c.id}>
+                            <td key={c.id} className={isAssigned ? "assigned-cell" : ""} title={isAssigned ? `${m.name} is assigned to ${c.name}: its requirements apply` : undefined}>
+                              {isAssigned && <div className="small assigned-mark">★ assigned</div>}
                               {r ? (
                                 <>
                                   <FlightPill r={r} />
@@ -583,8 +636,30 @@ function how(v?: Verification): string {
 }
 
 /** each system's verdict on each mission requirement, and how it was verified */
-function VerificationTable({ results, docs, ids }: { results: Record<string, FlownMission>; docs: Record<string, string>; ids: Record<string, string | null> }) {
+function VerificationTable({
+  labels = {},
+  assigned = new Set<string>(),
+  results,
+  docs,
+  mission,
+  evidence,
+  busy,
+  onRecord,
+  onOpen,
+}: {
+  results: Record<string, FlownMission>;
+  docs: Record<string, string>;
+  /** the saved mission shown, null for a draft (which cannot be recorded) */
+  mission: string | null;
+  evidence: EvidenceRecord[];
+  busy: boolean;
+  onRecord(resultId: string): void;
+  onOpen(el: Located): void;
+  labels?: Record<string, string>;
+  assigned?: Set<string>;
+}) {
   const reqs = [...new Set(Object.values(results).flatMap((r) => Object.keys(r.verification || {})))];
+  const withSims = Object.values(results).some((r) => Object.keys(r.simulations || {}).length);
   if (!reqs.length) return null;
   const method = (q: string) => Object.values(results).find((r) => r.verification?.[q])?.verification[q];
   return (
@@ -597,20 +672,23 @@ function VerificationTable({ results, docs, ids }: { results: Record<string, Flo
               const m = method(q);
               return (
                 <th key={q} title={docs[q]}>
-                  <ReqId id={ids[q]} />
-                  {short(q)}
+                  {labels[q] || short(q)}
                   <div className="muted small">{m?.method === "simulation" ? `◆ simulated · ${short(m.by)}` : "○ estimated · mission totals"}</div>
                 </th>
               );
             })}
+            {withSims && <th title="Simulation results recorded as verification evidence in the model (VerificationEvidence)">Evidence</th>}
           </tr>
         </thead>
         <tbody>
           {Object.entries(results).map(([qn, r]) => (
-            <tr key={qn}>
-              <td className="mono strong">{short(qn)}</td>
+            <tr key={qn} className={assigned.has(qn) ? "assigned-row" : ""}>
+              <td className="mono strong">
+                {short(qn)}
+                {assigned.size > 0 && <div className="small muted">{assigned.has(qn) ? "★ assigned" : "candidate"}</div>}
+              </td>
               {r.problems.length ? (
-                <td colSpan={reqs.length} className="muted small">
+                <td colSpan={reqs.length + (withSims ? 1 : 0)} className="muted small">
                   ⊘ {r.problems.join("; ")}
                 </td>
               ) : (
@@ -624,6 +702,51 @@ function VerificationTable({ results, docs, ids }: { results: Record<string, Flo
                     </td>
                   );
                 })
+              )}
+              {withSims && !r.problems.length && (
+                <td>
+                  {Object.entries(r.simulations || {}).map(([sim, run]) => {
+                    const ev = mission ? evidence.find((e) => e.values.mission === mission && e.system === qn && e.simulation === sim) : undefined;
+                    const recordable = !!mission && !!run.resultId && !!run.outputs;
+                    // this very result is the recorded one
+                    const same = ev && ev.values.resultId === run.resultId;
+                    return (
+                      <div key={sim} className="evidence-cell">
+                        {Object.keys(r.simulations || {}).length > 1 && <span className="muted small">{short(sim)} </span>}
+                        {ev && (
+                          <span
+                            className={`pill ${ev.status === "current" ? "ok" : "warn"}`}
+                            title={`${ev.qualifiedName}\nresult ${ev.values.resultId} at commit ${ev.values.commitId?.slice(0, 8)}, recorded ${ev.values.recordedAt}\n${
+                              ev.status === "current" ? "Still current: the newest result has the same inputs, simulator version and verdicts." : "Outdated: the model changed what this simulation computes or concludes since it was recorded."
+                            }`}
+                          >
+                            ◆ {ev.status === "current" ? "recorded" : ev.status === "outdated" ? "outdated" : "result missing"}
+                          </span>
+                        )}
+                        {ev && (
+                          <button className="link" onClick={() => onOpen(ev)}>
+                            Show
+                          </button>
+                        )}
+                        {(!ev || !same) && (
+                          <button
+                            className="link"
+                            disabled={busy || !recordable}
+                            title={!mission ? "Save the mission first: a draft is not in the model" : !run.outputs ? run.error || "The simulation failed" : ev ? "Replace the recorded evidence with this result" : "Record this result as verification evidence in the model"}
+                            onClick={() => run.resultId && onRecord(run.resultId)}
+                          >
+                            {ev ? "Re-record" : "Record"}
+                          </button>
+                        )}
+                        {run.resultId && (
+                          <a className="small" href={api.resultUrl(run.resultId)} target="_blank" rel="noreferrer" title={`Stored result ${run.resultId}${run.reused ? " (outputs reused: same inputs as an earlier result)" : ""}`}>
+                            data ↗
+                          </a>
+                        )}
+                      </div>
+                    );
+                  })}
+                </td>
               )}
             </tr>
           ))}

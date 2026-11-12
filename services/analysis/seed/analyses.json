@@ -272,6 +272,269 @@
     ]
   },
   {
+    "name": "componentCurves",
+    "kind": "external",
+    "description": "Performance curves of one propeller (CT, CP against advance ratio) or motor (full-throttle torque, speed, power, efficiency against current), as the dynamics simulator uses them (mission simulator service).",
+    "endpointUrl": "http://mission-sim:8011/curves",
+    "inputs": [
+      {
+        "name": "component",
+        "description": "propeller or motor"
+      },
+      {
+        "name": "ct0"
+      },
+      {
+        "name": "ct1"
+      },
+      {
+        "name": "ct2"
+      },
+      {
+        "name": "cp0"
+      },
+      {
+        "name": "cp1"
+      },
+      {
+        "name": "cp2"
+      },
+      {
+        "name": "kv",
+        "unit": "rpm/V"
+      },
+      {
+        "name": "resistance",
+        "unit": "ohm"
+      },
+      {
+        "name": "noLoadCurrent",
+        "unit": "A"
+      },
+      {
+        "name": "maxCurrent",
+        "unit": "A"
+      },
+      {
+        "name": "voltage",
+        "unit": "V",
+        "description": "supply voltage for a motor's full-throttle curves"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "curves"
+      },
+      {
+        "name": "summary"
+      }
+    ],
+    "timeoutSeconds": 10
+  },
+  {
+    "name": "controlSimulator",
+    "kind": "external",
+    "version": "2",
+    "description": "Controllability of a multirotor (mission simulator service): 6-DOF rigid body with rotor and motor dynamics and reaction torques, a command mixer and cascaded PID loops down to each ESC. mode=tune identifies the dynamics from open-loop tests and proposes gains; mode=verify uses the given gains (rpmKp ... positionKp, rpmLoop). Both fly the control tests given (climb-rate, speed or heading steps, gusts) and report each one's results under testResults[requirement].",
+    "endpointUrl": "http://mission-sim:8011/control",
+    "inputs": [
+      {
+        "name": "mode",
+        "description": "tune or verify"
+      },
+      {
+        "name": "tests",
+        "description": "control tests to fly: requirement, command (climbRate, speed, heading, gust), step, rate, hold"
+      },
+      {
+        "name": "rotorCount"
+      },
+      {
+        "name": "takeoffMass",
+        "unit": "kg"
+      },
+      {
+        "name": "armLength",
+        "unit": "m"
+      },
+      {
+        "name": "inertiaXX",
+        "unit": "kg*m**2"
+      },
+      {
+        "name": "inertiaYY",
+        "unit": "kg*m**2"
+      },
+      {
+        "name": "inertiaZZ",
+        "unit": "kg*m**2"
+      },
+      {
+        "name": "rotorInertia",
+        "unit": "kg*m**2"
+      },
+      {
+        "name": "firstRotorSpin"
+      },
+      {
+        "name": "dragArea",
+        "unit": "m**2"
+      },
+      {
+        "name": "propDiameter",
+        "unit": "in"
+      },
+      {
+        "name": "ct0"
+      },
+      {
+        "name": "cp0"
+      },
+      {
+        "name": "motorKv",
+        "unit": "rpm/V"
+      },
+      {
+        "name": "motorResistance",
+        "unit": "ohm"
+      },
+      {
+        "name": "motorNoLoadCurrent",
+        "unit": "A"
+      },
+      {
+        "name": "motorMaxCurrent",
+        "unit": "A"
+      },
+      {
+        "name": "batteryVoltage",
+        "unit": "V"
+      },
+      {
+        "name": "maxTilt",
+        "unit": "deg"
+      },
+      {
+        "name": "maxYawRate",
+        "unit": "deg/s"
+      },
+      {
+        "name": "rpmLoop",
+        "description": "true: the ESCs hold the commanded speed"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "gains"
+      },
+      {
+        "name": "mixer"
+      },
+      {
+        "name": "hover"
+      },
+      {
+        "name": "identification"
+      },
+      {
+        "name": "margins"
+      },
+      {
+        "name": "scenarios"
+      },
+      {
+        "name": "testResults"
+      },
+      {
+        "name": "issues"
+      },
+      {
+        "name": "completed"
+      },
+      {
+        "name": "phaseMargin",
+        "unit": "deg"
+      },
+      {
+        "name": "gainMargin",
+        "unit": "dB"
+      },
+      {
+        "name": "thrustMargin"
+      },
+      {
+        "name": "yawAuthority"
+      },
+      {
+        "name": "saturation",
+        "unit": "%"
+      },
+      {
+        "name": "climbSettlingTime",
+        "unit": "s"
+      },
+      {
+        "name": "speedSettlingTime",
+        "unit": "s"
+      },
+      {
+        "name": "speedOvershoot",
+        "unit": "%"
+      },
+      {
+        "name": "headingSettlingTime",
+        "unit": "s"
+      },
+      {
+        "name": "gustDeviation",
+        "unit": "m"
+      },
+      {
+        "name": "rpmKp"
+      },
+      {
+        "name": "rpmKi"
+      },
+      {
+        "name": "rateKp"
+      },
+      {
+        "name": "rateKi"
+      },
+      {
+        "name": "rateKd"
+      },
+      {
+        "name": "yawRateKp"
+      },
+      {
+        "name": "yawRateKi"
+      },
+      {
+        "name": "attitudeKp"
+      },
+      {
+        "name": "headingKp"
+      },
+      {
+        "name": "velocityKp"
+      },
+      {
+        "name": "velocityKi"
+      },
+      {
+        "name": "verticalKp"
+      },
+      {
+        "name": "verticalKi"
+      },
+      {
+        "name": "positionKp"
+      }
+    ],
+    "timeoutSeconds": 120
+  },
+  {
     "name": "propellerAero",
     "kind": "external",
     "description": "Propeller aerodynamics: XFOIL polars of the blade sections at their Reynolds and Mach numbers, and a blade-element momentum model with Prandtl tip and hub losses; thrust and power coefficients against advance ratio, fitted as CT, CP quadratics (aero service).",

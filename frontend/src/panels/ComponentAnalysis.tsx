@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api";
 import type { Catalog, CatalogChange, Component, ComponentAnalysisResult, ComponentInstance, Located, PropellerAeroOutputs } from "../types";
 import { errorText, short } from "./catalogUtil";
-import { SERIES } from "./MissionSimulation";
+import { useTheme } from "../theme";
+import { SERIES as SERIES_LIGHT, SERIES_DARK } from "./MissionSimulation";
 
 interface Props {
   projectId: string;
@@ -175,6 +176,7 @@ export function ComponentAnalysisCard({ projectId, catalog, comp, instances, bus
 const poly = (c: (number | null)[], x: number) => (c[0] ?? 0) + (c[1] ?? 0) * x + (c[2] ?? 0) * x * x;
 
 function PropellerCharts({ aero, current }: { aero: PropellerAeroOutputs; current: Record<string, string> }) {
+  const SERIES = useTheme().theme === "dark" ? SERIES_DARK : SERIES_LIGHT;
   const js = aero.curve.map((p) => p.J);
   const jMax = Math.max(...js);
   const grid = Array.from({ length: 41 }, (_, i) => (i / 40) * jMax);

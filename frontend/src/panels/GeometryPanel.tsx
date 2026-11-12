@@ -4,7 +4,7 @@ import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { api } from "../api";
 import type { GeometryInfo, GeometryPart } from "../types";
-import { getTheme, useTheme, type Theme } from "../theme";
+import { cssVar, useTheme } from "../theme";
 import { errorText, short, type CatalogPanelProps } from "./catalogUtil";
 
 /** Everything three.js, kept out of React state. */
@@ -17,23 +17,13 @@ interface Viewer {
   meshes: THREE.Mesh[];
   /** centre of the model, for the exploded view */
   center: THREE.Vector3;
-  /** floor grid, rebuilt when the theme changes */
+  /** themed: background, grid and the light from the ground follow the colour theme */
+  hemi: THREE.HemisphereLight;
   grid: THREE.GridHelper;
 }
 
-const HOVER = new THREE.Color("#f59e0b");
-const SELECT = new THREE.Color("#2563eb");
-
-/** Viewer background and floor-grid colors per UI theme. */
-const SCENE_COLORS: Record<Theme, { bg: string; axis: string; line: string }> = {
-  light: { bg: "#f1f5f9", axis: "#94a3b8", line: "#cbd5e1" },
-  dark: { bg: "#11151b", axis: "#5d6878", line: "#2a313b" },
-};
-
-function makeGrid(theme: Theme) {
-  const c = SCENE_COLORS[theme];
-  return new THREE.GridHelper(10, 100, c.axis, c.line); // 10 cm squares
-}
+/** The floor grid in the theme's colours: 10 cm squares. */
+const themedGrid = () => new THREE.GridHelper(10, 100, cssVar("--viewer-grid"), cssVar("--viewer-grid-minor"));
 
 /** 3-D viewer of system instances. The geometry service generates a glTF scene
  *  from the component instances in the system's slots; the scene is re-read
@@ -50,6 +40,7 @@ export function GeometryPanel({ projectId, catalog, loading, error, onOpen }: Ca
   const [spin, setSpin] = useState(false);
   const host = useRef<HTMLDivElement>(null);
   const viewer = useRef<Viewer | null>(null);
+  const { theme } = useTheme();
 
   const configs = catalog?.configurations || [];
   const system = configs.find((c) => c.qualifiedName === systemQn) || configs[0];
@@ -64,19 +55,19 @@ export function GeometryPanel({ projectId, catalog, loading, error, onOpen }: Ca
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     el.appendChild(renderer.domElement);
     const scene = new THREE.Scene();
-    const theme0 = getTheme();
-    scene.background = new THREE.Color(SCENE_COLORS[theme0].bg);
-    scene.add(new THREE.HemisphereLight("#ffffff", "#94a3b8", 1.6));
+    scene.background = new THREE.Color(cssVar("--viewer-bg"));
+    const hemi = new THREE.HemisphereLight("#ffffff", cssVar("--viewer-ground"), 1.6);
+    scene.add(hemi);
     const sun = new THREE.DirectionalLight("#ffffff", 2.2);
     sun.position.set(3, 6, 4);
     scene.add(sun);
-    const grid = makeGrid(theme0);
+    const grid = themedGrid();
     scene.add(grid);
     const camera = new THREE.PerspectiveCamera(40, 1, 0.01, 200);
     camera.position.set(1.5, 1.2, 1.5);
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true;
-    const v: Viewer = { renderer, scene, camera, controls, model: null, meshes: [], center: new THREE.Vector3(), grid };
+    const v: Viewer = { renderer, scene, camera, controls, model: null, meshes: [], center: new THREE.Vector3(), hemi, grid };
     viewer.current = v;
 
     const resize = () => {
@@ -104,20 +95,6 @@ export function GeometryPanel({ projectId, catalog, loading, error, onOpen }: Ca
       viewer.current = null;
     };
   }, []);
-
-  // ---------------------------------------------------------- follow the light/dark theme
-  const theme = useTheme();
-  useEffect(() => {
-    const v = viewer.current;
-    if (!v) return;
-    v.scene.background = new THREE.Color(SCENE_COLORS[theme].bg);
-    const grid = makeGrid(theme);
-    grid.position.copy(v.grid.position);
-    v.scene.remove(v.grid);
-    v.grid.dispose();
-    v.scene.add(grid);
-    v.grid = grid;
-  }, [theme]);
 
   // ---------------------------------------------------------- load the system's scene (and again after every catalog change)
   const fitKey = useRef<string | null>(null);
@@ -179,6 +156,8 @@ export function GeometryPanel({ projectId, catalog, loading, error, onOpen }: Ca
     const v = viewer.current;
     if (!v) return;
     v.controls.autoRotate = spin;
+    const select = new THREE.Color(cssVar("--accent"));
+    const hover = new THREE.Color(cssVar("--active"));
     for (const m of v.meshes) {
       // exploded view: every part moves away from the centre, a little more upwards
       m.geometry.boundingBox!.getCenter(m.position).sub(v.center).multiply(new THREE.Vector3(1, 1.6, 1)).multiplyScalar(exploded);
@@ -187,10 +166,22 @@ export function GeometryPanel({ projectId, catalog, loading, error, onOpen }: Ca
       const node = m.userData as GeometryPart;
       const sel = selected && partKey(node) === selected;
       const hov = hovered && partKey(node) === hovered;
-      mat.emissive.copy(sel ? SELECT : hov ? HOVER : new THREE.Color(0));
+      mat.emissive.copy(sel ? select : hov ? hover : new THREE.Color(0));
       mat.emissiveIntensity = sel ? 0.55 : hov ? 0.45 : 0;
     }
-  }, [info, exploded, discs, spin, selected, hovered]);
+  }, [info, exploded, discs, spin, selected, hovered, theme]);
+
+  // ---------------------------------------------------------- colour theme
+  useEffect(() => {
+    const v = viewer.current;
+    if (!v) return;
+    v.scene.background = new THREE.Color(cssVar("--viewer-bg"));
+    v.hemi.groundColor.set(cssVar("--viewer-ground"));
+    v.scene.remove(v.grid);
+    v.grid.dispose();
+    v.grid = themedGrid();
+    v.scene.add(v.grid);
+  }, [theme]);
 
   // ---------------------------------------------------------- picking
   const pick = (e: React.PointerEvent): string | null => {

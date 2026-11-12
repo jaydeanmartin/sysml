@@ -239,153 +239,177 @@ def test_mission_simulations_are_tool_bound_defs_with_a_subject():
     assert cat["architectures"][0]["simulations"] == ["B::Sim"]
 
 
-# ------------------------------------------------------------------ requirement library, usages and tests
-REQ_GRAPH = {
-    "nodes": [
-        node("R", "package", "R"),
-        node("R__Component", "metadata def", "Component", "R"),
-        node("R__SystemArchitecture", "metadata def", "SystemArchitecture", "R"),
-        # library: abstract, an attribute without a value (minimum) left for each instance
-        node("R__Min", "requirement def", "Min", "R", shortName="LIB-1", isAbstract=True, doc="at least {minimum}", constraints=[{"kind": "require", "text": "actual >= minimum"}]),
-        node("R__Min__actual", "attribute", "actual", "R__Min", typeName="Real"),
-        node("R__Min__minimum", "attribute", "minimum", "R__Min", typeName="Real"),
-        # a composite requirement def with a nested library requirement
-        node("R__Perf", "requirement def", "Perf", "R", shortName="PERF-1"),
-        node("R__Perf__payload", "requirement", "payload", "R__Perf", typeId="R__Min", typeName="Min"),
-        node("R__Battery", "part def", "Battery", "R", metadata=["Component"]),
-        node("R__Battery__energy", "attribute", "energy", "R__Battery", typeName="Real"),
-        node("R__Battery__cap", "requirement", "cap", "R__Battery", typeId="R__Min", typeName="Min"),
-        node("R__Battery__cap__actual", "attribute", "actual", "R__Battery__cap", value="energy", redefines="R__Min__actual"),
-        node("R__Cat", "package", "Cat", "R"),
-        node("R__Cat__b1", "part", "b1", "R__Cat", typeId="R__Battery", typeName="Battery"),
-        node("R__Cat__b1__cap", "requirement", "cap", "R__Cat__b1", redefines="R__Battery__cap"),
-        node("R__Cat__b1__cap__minimum", "attribute", "minimum", "R__Cat__b1__cap", value="100", redefines="R__Min__minimum"),
-        node("R__Cat__b2", "part", "b2", "R__Cat", typeId="R__Battery", typeName="Battery"),  # states no number
-        node("R__Drone", "part def", "Drone", "R", metadata=["SystemArchitecture"]),
-        node("R__Drone__battery", "part", "battery", "R__Drone", typeId="R__Battery", typeName="Battery"),
-        node("R__Drone__perf", "requirement", "perf", "R__Drone", typeId="R__Perf", typeName="Perf"),
-        node("R__Drone__perf__payload", "requirement", "payload", "R__Drone__perf"),
-        node("R__Drone__perf__payload__actual", "attribute", "actual", "R__Drone__perf__payload", value="cap"),
-        node("R__Cfg", "package", "Cfg", "R"),
-        node("R__Cfg__d1", "part", "d1", "R__Cfg", typeId="R__Drone", typeName="Drone"),
-        node("R__Cfg__d1__perf", "requirement", "perf", "R__Cfg__d1"),
-        node("R__Cfg__d1__perf__payload", "requirement", "payload", "R__Cfg__d1__perf"),
-        node("R__Cfg__d1__perf__payload__minimum", "attribute", "minimum", "R__Cfg__d1__perf__payload", value="2"),
-        # tests: one verifies a usage (through its subject), one a def
-        node("R__Bench", "verification def", "Bench", "R"),
-        node("R__Bench__battery", "subject", "battery", "R__Bench", typeId="R__Battery", typeName="Battery"),
-        node("R__Weigh", "verification def", "Weigh", "R"),
-        node("R__Weigh__drone", "subject", "drone", "R__Weigh", typeId="R__Drone", typeName="Drone"),
-    ],
-    "edges": [
-        {"id": "v1", "kind": "verify", "source": "R__Bench", "target": "R__Battery__cap"},
-        {"id": "v2", "kind": "verify", "source": "R__Weigh", "target": "R__Min"},
-    ],
-}
-
-
-@pytest.fixture(scope="module")
-def rcat():
-    return catalog.build(REQ_GRAPH, {"Lib.sysml": {"id": "lib", "name": "Lib"}})
-
-
-def test_library_requirements_are_templates_not_applied_by_subject(rcat):
-    reqs = {r["name"]: r for r in rcat["requirements"]}
-    assert reqs["Min"]["template"] and reqs["Min"]["subjectTypeId"] is None
-    assert [t["name"] for t in reqs["Min"]["thresholds"]] == ["actual", "minimum"]
-    assert reqs["Perf"]["children"] == [{"name": "payload", "type": "Min"}]
-    assert reqs["Min"]["tests"] == ["R::Weigh"]
-    [arch] = rcat["architectures"]
-    assert arch["requirements"] == [] and arch["missionRequirements"] == []
-
-
-def test_requirement_usages_of_defs_and_instances(rcat):
-    comps = {c["name"]: c for c in rcat["components"]}
-    [cap] = comps["Battery"]["requirementUsages"]
-    # the def binds what it constrains; the minimum is left for each instance
-    assert cap["def"] == "R::Min" and cap["values"] == {"actual": "energy"} and cap["missing"] == ["minimum"]
-    assert cap["declarations"] == ["R::Battery::cap"]
-    inst = {i["name"]: i for i in rcat["instances"]}
-    [b1cap] = inst["b1"]["requirementUsages"]
-    assert b1cap["values"] == {"actual": "energy", "minimum": "100"} and b1cap["ownValues"] == {"minimum": "100"}
-    assert b1cap["missing"] == [] and b1cap["bound"] == ["actual", "minimum"]
-    assert inst["b1"]["missingRequirementValues"] == []
-    assert inst["b2"]["missingRequirementValues"] == ["cap.minimum"]
-    assert catalog.own_requirement_values(inst["b1"]["requirementUsages"]) == {"cap.minimum": "100"}
-
-
-def test_nested_requirement_usages(rcat):
-    [arch] = rcat["architectures"]
-    [perf] = arch["requirementUsages"]
-    [payload] = perf["children"]
-    assert payload["path"] == "perf.payload" and payload["def"] == "R::Min"
-    assert payload["values"] == {"actual": "cap"} and payload["missing"] == ["minimum"]
-    # declared in the requirement def, redefined in the architecture
-    assert payload["declarations"] == ["R::Perf::payload", "R::Drone::perf::payload"]
-    [cfg] = rcat["configurations"]
-    assert cfg["missingRequirementValues"] == []
-    assert catalog.own_requirement_values(cfg["requirementUsages"]) == {"perf.payload.minimum": "2"}
-    # values a draft would state
-    [drafted] = catalog.apply_values(arch["requirementUsages"], {"perf.payload.minimum": "3"})
-    assert drafted["children"][0]["values"]["minimum"] == "3" and drafted["children"][0]["missing"] == []
-
-
-def test_tests_verify_usages_and_defs_for_their_subject_type(rcat):
-    tests = {t["name"]: t for t in rcat["tests"]}
-    assert tests["Bench"]["method"] == "analysis" and tests["Bench"]["verifies"] == ["R::Battery::cap"]
-    comps = {c["name"]: c for c in rcat["components"]}
-    [cap] = comps["Battery"]["requirementUsages"]
-    found = catalog.verifying_tests(rcat["tests"], cap["defLineage"], cap["declarations"], comps["Battery"]["lineageIds"])
-    # Bench names the usage; Weigh verifies Min, but only with a Drone as subject
-    assert [t["name"] for t in found] == ["Bench"]
-    [arch] = rcat["architectures"]
-    payload = arch["requirementUsages"][0]["children"][0]
-    found = catalog.verifying_tests(rcat["tests"], payload["defLineage"], payload["declarations"], arch["lineageIds"])
-    assert [t["name"] for t in found] == ["Weigh"]
-
-
-def test_requirement_values_text():
-    assert catalog.requirements_text({"cap.minimum": "100"}) == ["requirement :>> cap { attribute :>> minimum = 100; }"]
-    assert catalog.requirements_text({"perf.payload.minimum": "2 [SI::kg]", "perf.mass.maximum": "25", "perf.limit": "1"}) == [
-        "requirement :>> perf {",
-        "    attribute :>> limit = 1;",
-        "    requirement :>> payload { attribute :>> minimum = 2 [SI::kg]; }",
-        "    requirement :>> mass { attribute :>> maximum = 25; }",
-        "}",
-    ]
-    assert catalog.configuration_text("d1", "Drone", {}, requirements={"perf.limit": "3"}) == [
-        "part d1 : Drone {",
-        "    requirement :>> perf { attribute :>> limit = 3; }",
-        "}",
-    ]
-    # an instance states numbers, not expressions
-    for bad in ("energy * 2", "1; part x"):
-        with pytest.raises(catalog.CatalogError):
-            catalog.requirements_text({"cap.minimum": bad})
-    # a usage declared with an id is redefined restating it
-    assert catalog.requirements_text({"cap.minimum": "100", "perf.payload.minimum": "2"}, {"cap": "BAT-01", "perf.payload": "P-1"}) == [
-        "requirement <'BAT-01'> cap :>> cap { attribute :>> minimum = 100; }",
-        "requirement :>> perf {",
-        "    requirement <'P-1'> payload :>> payload { attribute :>> minimum = 2; }",
-        "}",
-    ]
-    assert catalog.requirement_usage_text("cap", "Min", {"actual": "energy"}) == ["requirement cap : Min { attribute :>> actual = energy; }"]
-    assert catalog.check_def_text("r1", "R::Min", "R::Cat::b1.cap", ["actual", "minimum"]) == (
-        "requirement def r1 :> R::Min { attribute :>> actual = R::Cat::b1.cap.actual; attribute :>> minimum = R::Cat::b1.cap.minimum; }"
+def test_simulation_evidence_is_found_with_its_metadata_values():
+    block = catalog.evidence_text(
+        "d1_trip", "B::Sim", "drone", "B::Cfg::d1",
+        {"resultId": "r-1", "uri": "/api/models/results/r-1", "verdict": "holds", "verdicts": 'Energy "holds"'},
+        "trip flown by d1",
     )
+    assert block[:3] == ["verification d1_trip : B::Sim {", "    doc /* trip flown by d1 */", "    subject drone = B::Cfg::d1;"]
+    assert '        verdicts = "Energy \\"holds\\"";' in block
+    text = "package Ev {\n" + "".join(f"    {l}\n" for l in block) + "}\n"
+    # the element spans lines 2..11 of Ev.sysml
+    graph = {
+        "nodes": MISSION_GRAPH["nodes"]
+        + [
+            node("B__Sim", "verification def", "Sim", "B", tool={"toolName": "missionSimulator"}),
+            node("B__Sim__drone", "subject", "drone", "B__Sim", typeId="B__Drone"),
+            node("Ev", "package", "Ev", file="Ev.sysml"),
+            {**node("Ev__d1_trip", "verification", "d1_trip", "Ev", file="Ev.sysml", typeId="B__Sim", metadata=["SimulationEvidence"]),
+             "loc": {"file": "Ev.sysml", "line": 2, "column": 5, "endLine": 1 + len(block), "endColumn": 6}},
+            node("Ev__d1_trip__drone", "subject", "drone", "Ev__d1_trip", file="Ev.sysml", value="B::Cfg::d1"),
+            node("Ev__plain", "verification", "plain", "Ev", file="Ev.sysml", typeId="B__Sim"),  # no metadata: not evidence
+        ],
+        "edges": MISSION_GRAPH["edges"],
+    }
+    cat = catalog.build(graph, {"Lib.sysml": {"id": "lib", "name": "Lib"}, "Ev.sysml": {"id": "ev", "name": "Ev"}}, {"Ev.sysml": text})
+    [ev] = cat["evidence"]
+    assert ev["simulation"] == "B::Sim" and ev["system"] == "B::Cfg::d1" and ev["modelName"] == "Ev"
+    assert ev["values"] == {"resultId": "r-1", "uri": "/api/models/results/r-1", "verdict": "holds", "verdicts": 'Energy "holds"'}
+    with pytest.raises(catalog.CatalogError):
+        catalog.evidence_text("1bad", "B::Sim", "drone", "B::Cfg::d1", {})
 
 
-def test_requirement_ids_are_short_names(rcat):
-    reqs = {r["name"]: r for r in rcat["requirements"]}
-    assert reqs["Min"]["shortId"] == "LIB-1" and reqs["Perf"]["shortId"] == "PERF-1"
-    [arch] = rcat["architectures"]
-    [perf] = arch["requirementUsages"]
-    # a usage without a short name of its own keeps its def's id apart
-    assert perf["shortId"] is None and perf["defShortId"] == "PERF-1"
-    # a nested one is numbered from its parent's id
-    assert perf["children"][0]["shortId"] == "PERF-1.1" and perf["children"][0]["defShortId"] == "LIB-1"
-    comps = {c["name"]: c for c in rcat["components"]}
-    assert comps["Battery"]["requirementUsages"][0]["shortId"] is None  # top level: never numbered
+def test_system_simulations_and_their_requirements():
+    graph = {
+        "nodes": MISSION_GRAPH["nodes"]
+        + [
+            node("B__SystemSimulation", "metadata def", "SystemSimulation", "B"),
+            node("B__Ctl", "verification def", "Ctl", "B", tool={"toolName": "controlSimulator"}, metadata=["SystemSimulation"]),
+            node("B__Ctl__drone", "subject", "drone", "B__Ctl", typeId="B__Drone"),
+            node("B__Ctl__margin", "param", "margin", "B__Ctl", direction="out"),
+            node("B__Tune", "analysis def", "Tune", "B", tool={"toolName": "controlSimulator"}, metadata=["SystemSimulation"]),
+            node("B__Tune__drone", "subject", "drone", "B__Tune", typeId="B__Drone"),
+            node("B__Stable", "requirement def", "Stable", "B"),
+            node("B__Stable__drone", "subject", "drone", "B__Stable", typeId="B__Drone"),
+            node("B__Stable__margin", "param", "margin", "B__Stable", direction="in"),
+            node("B__ControlTest", "metadata def", "ControlTest", "B"),
+            node("B__Climb", "requirement def", "Climb", "B", metadata=["ControlTest"]),
+            node("B__Climb__drone", "subject", "drone", "B__Climb", typeId="B__Drone"),
+            node("B__Climb__command", "attribute", "command", "B__Climb", value='"climbRate"'),
+            node("B__Climb__step", "attribute", "step", "B__Climb", value="drone.takeoff.climbRate"),
+            node("B__Climb__settlingTime", "param", "settlingTime", "B__Climb", direction="in"),
+            node("B__Climb__settlingLimit", "attribute", "settlingLimit", "B__Climb"),
+            # test instances: the limits set, one also overriding what it flies
+            node("B__Spec", "package", "Spec", "B"),
+            node("B__Spec__climb", "requirement", "climb", "B__Spec", typeId="B__Climb"),
+            node("B__Spec__climb__settlingLimit", "attribute", "settlingLimit", "B__Spec__climb", value="4"),
+            node("B__Spec__stable", "requirement", "stable", "B__Spec", typeId="B__Stable"),
+            node("B__Spec__steep", "requirement", "steep", "B__Spec", typeId="B__Climb"),
+            node("B__Spec__steep__step", "attribute", "step", "B__Spec__steep", value="1.5"),
+        ],
+        "edges": MISSION_GRAPH["edges"] + [
+            {"id": "v1", "kind": "verify", "source": "B__Ctl", "target": "B__Stable"},
+            {"id": "v2", "kind": "verify", "source": "B__Ctl", "target": "B__Climb"},
+        ],
+    }
+    cat = catalog.build(graph, {"Lib.sysml": {"id": "lib", "name": "Lib"}})
+    spec = {r["name"]: r for r in cat["specification"]}
+    assert spec["climb"]["appliesTo"] == ["B::Cfg::d1"]
+    # with d1 satisfying another climb test, that one replaces it for d1, flying its own step
+    graph["edges"] = graph["edges"] + [{"id": "s1", "kind": "satisfy", "source": "B__Cfg__d1", "target": "B__Spec__steep"}]
+    steep = {r["name"]: r for r in catalog.build(graph, {"Lib.sysml": {"id": "lib", "name": "Lib"}})["specification"]}
+    assert steep["climb"]["appliesTo"] == [] and steep["steep"]["appliesTo"] == ["B::Cfg::d1"]
+    assert steep["steep"]["flies"] == {"command": '"climbRate"', "step": "1.5"}
+    sims = {s["name"]: s for s in cat["simulations"]}
+    # a control test: its attributes say what to fly
+    climb = next(r for r in cat["requirements"] if r["name"] == "Climb")
+    assert climb["isTest"] and climb["attributes"] == {"command": '"climbRate"', "step": "drone.takeoff.climbRate"}
+    assert not next(r for r in cat["requirements"] if r["name"] == "Stable")["isTest"]
+    # a test instance flies what its type gives a value; the open attributes are its limits
+    spec = {r["name"]: r for r in cat["specification"]}
+    assert spec["climb"]["isTest"] and spec["climb"]["flies"] == {"command": '"climbRate"', "step": "drone.takeoff.climbRate"}
+    assert spec["climb"]["measured"] == ["settlingTime"]
+    assert not spec["stable"]["isTest"] and spec["stable"]["flies"] == {}
+    assert (sims["Ctl"]["scope"], sims["Ctl"]["kind"]) == ("system", "verification def")
+    assert (sims["Tune"]["scope"], sims["Tune"]["kind"]) == ("system", "analysis def")
+    [arch] = cat["architectures"]
+    assert arch["systemSimulations"] == ["B::Ctl", "B::Tune"] and arch["simulations"] == []
+    # a requirement a system simulation verifies is a system requirement, not a mission one
+    assert arch["systemRequirements"] == ["B::Stable", "B::Climb"]
+    assert arch["missionRequirements"] == ["B::Energy"]
+    assert cat["tags"]["SystemSimulation"] == "B::SystemSimulation"
+
+
+def test_specification_hierarchy_parameters_and_applicability():
+    nodes = GRAPH["nodes"] + [
+        # requirement types on an abstract system and an abstract component
+        node("R", "package", "R"),
+        node("R__Weight", "requirement def", "Weight", "R", isAbstract=True),
+        node("R__Weight__car", "subject", "car", "R__Weight", typeId="A__Car"),
+        node("R__Weight__limit", "attribute", "limit", "R__Weight", typeName="MassValue"),
+        node("R__Weight__margin", "attribute", "margin", "R__Weight", value="0"),
+        node("R__GearCount", "requirement def", "GearCount", "R", isAbstract=True),
+        node("R__GearCount__box", "subject", "box", "R__GearCount", typeId="L__Gearbox"),
+        node("R__GearCount__minimum", "attribute", "minimum", "R__GearCount"),
+        # the specification: a statement holding instances
+        node("R__Spec", "package", "Spec", "R"),
+        node("R__Spec__top", "requirement", "top", "R__Spec", shortName="STK-1", doc="Cars shall be good."),
+        node("R__Spec__top__light", "requirement", "light", "R__Spec__top", shortName="SYS-1", typeId="R__Weight", typeName="Weight"),
+        node("R__Spec__top__light__limit", "attribute", "limit", "R__Spec__top__light", value="1500 [SI::kg]"),
+        node("R__Spec__top__lighter", "requirement", "lighter", "R__Spec__top", shortName="SYS-2", typeId="R__Weight", typeName="Weight"),
+        node("R__Spec__top__gears", "requirement", "gears", "R__Spec__top", shortName="CMP-1", typeId="R__GearCount", typeName="GearCount"),
+        # a verify usage in a verification objective is not part of the specification
+        node("R__Test", "verification def", "Test", "R"),
+        node("R__Test__obj", "requirement", "obj", "R__Test"),
+        node("R__Test__obj__light", "requirement", "light", "R__Test__obj", typeId="R__Weight"),
+    ]
+    edges = GRAPH["edges"] + [{"id": "s9", "kind": "satisfy", "source": "A__base", "target": "R__Spec__top__lighter"}]
+    cat = catalog.build({"nodes": nodes, "edges": edges}, FILES)
+    spec = {r["name"]: r for r in cat["specification"]}
+    assert list(spec) == ["top", "light", "lighter", "gears"]
+    top, light, lighter, gears = spec["top"], spec["light"], spec["lighter"], spec["gears"]
+    assert (top["level"], top["type"], top["parent"], top["shortName"]) == ("statement", None, None, "STK-1")
+    assert light["parent"] == "R::Spec::top" and light["type"] == "R::Weight" and light["isAbstractType"]
+    params = {p["name"]: (p["value"], p["bound"]) for p in light["parameters"]}
+    assert params == {"limit": ("1500 [SI::kg]", True), "margin": ("0", False)}
+    # applicability: every system the subject type fits, or what satisfy names
+    # ... except that an instance a system satisfies replaces, for it, those of the same type
+    assert light["level"] == "system" and light["appliesTo"] == [] and not light["explicit"]
+    assert light["replacedFor"] == {"A::base": "R::Spec::top::lighter"}
+    assert lighter["explicit"] and lighter["appliesTo"] == ["A::base"]
+    assert gears["level"] == "component" and gears["appliesTo"] == ["L::Cat::m6"]  # a Manual is a Gearbox
+
+
+def test_missions_as_use_cases_with_objective_requirements_and_assignments():
+    nodes = MISSION_GRAPH["nodes"] + [
+        node("B__Time", "requirement def", "Time", "B", isAbstract=True),
+        node("B__Time__drone", "subject", "drone", "B__Time", typeId="B__Drone"),
+        node("B__Time__limit", "attribute", "limit", "B__Time"),
+        node("B__Time__duration", "param", "duration", "B__Time", direction="in"),
+        # a use-case mission type: the drone as subject, requirements in its objective
+        node("B__Run", "use case def", "Run", "B", metadata=["Mission"]),
+        node("B__Run__duration", "attribute", "duration", "B__Run", typeName="Real"),
+        node("B__Run__goals", "requirement", "goals", "B__Run"),
+        node("B__Run__goals__onTime", "requirement", "onTime", "B__Run__goals", typeId="B__Time", shortName="MIS-1"),
+        node("B__Run__goals__onTime__limit", "attribute", "limit", "B__Run__goals__onTime", value="1800"),
+        # a mission adding a requirement of its own in its (redefined) objective
+        node("B__Ms__far", "use case", "far", "B__Ms", typeId="B__Run", typeName="Run"),
+        node("B__Ms__far__goals", "requirement", "goals", "B__Ms__far", redefines="B__Run__goals"),
+        node("B__Ms__far__goals__window", "requirement", "window", "B__Ms__far__goals", typeId="B__Time", shortName="MIS-F1"),
+        node("B__Ms__far__fly", "action", "fly", "B__Ms__far", typeId="B__Fly", typeName="Fly"),
+    ]
+    edges = MISSION_GRAPH["edges"] + [{"id": "a1", "kind": "allocation", "source": "B__Ms__far", "target": "B__Cfg__d1", "loc": None}]
+    cat = catalog.build({"nodes": nodes, "edges": edges}, {"Lib.sysml": {"id": "lib", "name": "Lib"}})
+    run = next(t for t in cat["missionTypes"] if t["name"] == "Run")
+    assert run["kind"] == "use case def" and run["requirements"] == ["B::Run::goals::onTime"]
+    far = next(m for m in cat["missions"] if m["name"] == "far")
+    assert far["missionType"] == "B::Run" and [s["name"] for s in far["steps"]] == ["fly"]
+    assert far["requirements"] == ["B::Ms::far::goals::window"] and far["assignedTo"] == ["B::Cfg::d1"]
+    reqs = {r["name"]: r for r in cat["missionRequirements"]}
+    assert reqs["onTime"]["owner"] == "B::Run" and reqs["onTime"]["measured"] == ["duration"]
+    assert {p["name"]: p["value"] for p in reqs["onTime"]["parameters"]} == {"limit": "1800"}
+    assert reqs["window"]["owner"] == "B::Ms::far" and reqs["window"]["architectures"] == ["B::Drone"]
+    assert cat["assignments"] == [{"mission": "B::Ms::far", "system": "B::Cfg::d1", "loc": None}]
+    # objective requirements are not part of the specification
+    assert not any(r["name"] in ("onTime", "window", "goals") for r in cat["specification"])
+
+
+def test_use_case_mission_text_keeps_its_objective():
+    obj = ["objective :>> goals {", "    requirement window : Time { attribute :>> limit = 1500; }", "}"]
+    text = catalog.mission_text("far", "Run", [("fly", "Fly", {"distance": "2000"})], "8 km", "use case", obj)
+    assert text[0] == "use case far : Run {" and text[1] == "    doc /* 8 km */"
+    assert text[2:5] == ["    " + l for l in obj] and text[5] == "    first start;"
 
 
 # ------------------------------------------------------------------ sub-parts and component analyses

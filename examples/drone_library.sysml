@@ -11,30 +11,11 @@ package DroneLibrary {
     metadata def SystemArchitecture {
         doc /* A system-level part def. Its part usages are slots that component instances fill, its performed actions behavior slots that behavior instances fill. */
     }
+    metadata def SystemSimulation {
+        doc /* A simulation of a system instance on its own (not of a mission), run from the Configurator. */
+    }
     metadata def Behavior {
         doc /* An abstract behavior: its in parameters are set by the system that performs it, its quantities by each mission step. */
-    }
-
-    // ---------------------------------------------------------- requirement library
-    // Abstract requirements, reused by components, architectures, behaviors and
-    // missions. A def includes one as a requirement usage and binds what it
-    // constrains (`actual`); every instance then states its own number (the
-    // minimum or maximum), so instances cannot leave a requirement open:
-    //     requirement <'BAT-01'> specificEnergy : MinimumValue { attribute :>> actual = energy / (mass / (1 [SI::kg])); }
-    //     part lipo4s5000 : Battery { ... requirement <'BAT-01'> specificEnergy :>> specificEnergy { attribute :>> minimum = 130; } }
-    // Requirement ids are short names (<'BAT-01'>). A redefinition restates the
-    // id: OpenSysML finds a feature that has a short name only by it.
-    abstract requirement def <'LIB-01'> MinimumValue {
-        doc /* The value shall be at least {minimum}. */
-        attribute actual : Real;
-        attribute minimum : Real;
-        require constraint { actual >= minimum }
-    }
-    abstract requirement def <'LIB-02'> MaximumValue {
-        doc /* The value shall not exceed {maximum}. */
-        attribute actual : Real;
-        attribute maximum : Real;
-        require constraint { actual <= maximum }
     }
 
     // ---------------------------------------------------------- interfaces
@@ -85,11 +66,6 @@ package DroneLibrary {
         attribute energy : Real;            // Wh
         attribute maxPower : Real;          // W (continuous discharge)
         port powerOut : PowerPort;
-        // each pack states the specific energy (Wh/kg) its datasheet guarantees
-        requirement <'BAT-01'> specificEnergy : MinimumValue {
-            doc /* The pack shall store at least {minimum} Wh per kg, harness included. */
-            attribute :>> actual = energy / (mass / (1 [SI::kg]));
-        }
     }
 
     #Component part def Motor {
@@ -148,6 +124,27 @@ package DroneLibrary {
     #Component part def Winch :> PayloadModule {
         doc /* Tether winch that lowers the parcel while the drone hovers. */
         attribute tetherLength : Real;      // m
+    }
+
+    #Component part def FlightController {
+        doc /* Cascaded flight-control loops and their gains: ESC speed (PI), body rates (PID roll and pitch, PI yaw), attitude and heading (P), velocity and vertical speed (PI), position (P). Tuned by the ControllerTuning analysis. */
+        attribute rpmKp : Real;                 // V per rad/s, ESC speed loop
+        attribute rpmKi : Real;                 // V per rad
+        attribute rateKp : Real;                // N·m per rad/s, roll and pitch rate
+        attribute rateKi : Real;                // N·m per rad
+        attribute rateKd : Real;                // N·m per rad/s²
+        attribute yawRateKp : Real;             // N·m per rad/s
+        attribute yawRateKi : Real;             // N·m per rad
+        attribute attitudeKp : Real;            // 1/s
+        attribute headingKp : Real;             // 1/s
+        attribute velocityKp : Real;            // 1/s
+        attribute velocityKi : Real;            // 1/s²
+        attribute verticalKp : Real;            // 1/s
+        attribute verticalKi : Real;            // 1/s²
+        attribute positionKp : Real;            // 1/s
+        attribute rpmLoop : Boolean default = true;     // the ESCs hold the commanded speed; false: throttle only
+        attribute maxTilt : Real default = 30;          // deg
+        attribute maxYawRate : Real default = 90;       // deg/s
     }
 
     // ---------------------------------------------------------- catalog
@@ -257,7 +254,6 @@ package DroneLibrary {
             attribute :>> voltage = 14.8;
             attribute :>> energy = 74;
             attribute :>> maxPower = 2200;
-            requirement <'BAT-01'> specificEnergy :>> specificEnergy { attribute :>> minimum = 130; }
         }
         part lipo4s8000 : Battery {
             doc /* 4S 8000 mAh LiPo */
@@ -265,7 +261,6 @@ package DroneLibrary {
             attribute :>> voltage = 14.8;
             attribute :>> energy = 118;
             attribute :>> maxPower = 2400;
-            requirement <'BAT-01'> specificEnergy :>> specificEnergy { attribute :>> minimum = 140; }
         }
         part lipo6s10000 : Battery {
             doc /* 6S 10000 mAh LiPo */
@@ -273,7 +268,6 @@ package DroneLibrary {
             attribute :>> voltage = 22.2;
             attribute :>> energy = 222;
             attribute :>> maxPower = 5000;
-            requirement <'BAT-01'> specificEnergy :>> specificEnergy { attribute :>> minimum = 160; }
         }
         part lipo6s22000 : Battery {
             doc /* 6S 22000 mAh LiPo */
@@ -281,7 +275,6 @@ package DroneLibrary {
             attribute :>> voltage = 22.2;
             attribute :>> energy = 488;
             attribute :>> maxPower = 10000;
-            requirement <'BAT-01'> specificEnergy :>> specificEnergy { attribute :>> minimum = 175; }
         }
         part liion6s30000 : Battery {
             doc /* 6S 30000 mAh Li-ion: more energy per kg, much less power */
@@ -289,7 +282,6 @@ package DroneLibrary {
             attribute :>> voltage = 21.6;
             attribute :>> energy = 666;
             attribute :>> maxPower = 3000;
-            requirement <'BAT-01'> specificEnergy :>> specificEnergy { attribute :>> minimum = 220; }
         }
         part lipo12s22000 : Battery {
             doc /* Two 6S 22000 mAh LiPo packs in series */
@@ -297,7 +289,6 @@ package DroneLibrary {
             attribute :>> voltage = 44.4;
             attribute :>> energy = 977;
             attribute :>> maxPower = 20000;
-            requirement <'BAT-01'> specificEnergy :>> specificEnergy { attribute :>> minimum = 180; }
         }
 
         // ------------------------------------------ motors
@@ -452,6 +443,108 @@ package DroneLibrary {
             attribute :>> capacity = 15 [SI::kg];
             attribute :>> tetherLength = 30;
         }
+        part fcCourier : FlightController {
+            doc /* Tuned for courier */
+            attribute :>> rpmKp = 0.02567;
+            attribute :>> rpmKi = 0.5436;
+            attribute :>> rateKp = 0.5261;
+            attribute :>> rateKi = 2.568;
+            attribute :>> rateKd = 0.003104;
+            attribute :>> yawRateKp = 0.5907;
+            attribute :>> yawRateKi = 2.884;
+            attribute :>> attitudeKp = 4.615;
+            attribute :>> headingKp = 4.615;
+            attribute :>> velocityKp = 1.538;
+            attribute :>> velocityKi = 0.5917;
+            attribute :>> verticalKp = 2.5;
+            attribute :>> verticalKi = 1.562;
+            attribute :>> positionKp = 0.3846;
+        }
+        part fcParcel : FlightController {
+            doc /* Tuned for parcel */
+            attribute :>> rpmKp = 0.05994;
+            attribute :>> rpmKi = 0.9362;
+            attribute :>> rateKp = 1.195;
+            attribute :>> rateKi = 4.391;
+            attribute :>> rateKd = 0.009561;
+            attribute :>> yawRateKp = 1.858;
+            attribute :>> yawRateKi = 6.829;
+            attribute :>> attitudeKp = 3.443;
+            attribute :>> headingKp = 3.464;
+            attribute :>> velocityKp = 1.148;
+            attribute :>> velocityKi = 0.3293;
+            attribute :>> verticalKp = 2.5;
+            attribute :>> verticalKi = 1.562;
+            attribute :>> positionKp = 0.2869;
+        }
+        part fcParcelLongRange : FlightController {
+            doc /* Tuned for parcelLongRange */
+            attribute :>> rpmKp = 0.06108;
+            attribute :>> rpmKi = 0.8966;
+            attribute :>> rateKp = 1.162;
+            attribute :>> rateKi = 4.028;
+            attribute :>> rateKd = 0.009897;
+            attribute :>> yawRateKp = 1.764;
+            attribute :>> yawRateKi = 6.113;
+            attribute :>> attitudeKp = 3.249;
+            attribute :>> headingKp = 3.269;
+            attribute :>> velocityKp = 1.083;
+            attribute :>> velocityKi = 0.2932;
+            attribute :>> verticalKp = 2.5;
+            attribute :>> verticalKi = 1.562;
+            attribute :>> positionKp = 0.2707;
+        }
+        part fcRegional : FlightController {
+            doc /* Tuned for regional */
+            attribute :>> rpmKp = 0.1199;
+            attribute :>> rpmKi = 2.349;
+            attribute :>> rateKp = 12.8;
+            attribute :>> rateKi = 58.14;
+            attribute :>> rateKd = 0.0817;
+            attribute :>> yawRateKp = 23.84;
+            attribute :>> yawRateKi = 108.3;
+            attribute :>> attitudeKp = 4.276;
+            attribute :>> headingKp = 4.289;
+            attribute :>> velocityKp = 1.425;
+            attribute :>> velocityKi = 0.5079;
+            attribute :>> verticalKp = 2.5;
+            attribute :>> verticalKi = 1.562;
+            attribute :>> positionKp = 0.3563;
+        }
+        part fcRegionalLiIon : FlightController {
+            doc /* Tuned for regionalLiIon */
+            attribute :>> rpmKp = 0.12;
+            attribute :>> rpmKi = 2.351;
+            attribute :>> rateKp = 12.87;
+            attribute :>> rateKi = 58.47;
+            attribute :>> rateKd = 0.08209;
+            attribute :>> yawRateKp = 23.85;
+            attribute :>> yawRateKi = 108.4;
+            attribute :>> attitudeKp = 4.276;
+            attribute :>> headingKp = 4.302;
+            attribute :>> velocityKp = 1.425;
+            attribute :>> velocityKi = 0.5079;
+            attribute :>> verticalKp = 2.5;
+            attribute :>> verticalKi = 1.562;
+            attribute :>> positionKp = 0.3563;
+        }
+        part fcHeavyLift : FlightController {
+            doc /* Tuned for heavyLift */
+            attribute :>> rpmKp = 0.123;
+            attribute :>> rpmKi = 2.394;
+            attribute :>> rateKp = 31.98;
+            attribute :>> rateKi = 144.4;
+            attribute :>> rateKd = 0.2053;
+            attribute :>> yawRateKp = 60.85;
+            attribute :>> yawRateKi = 274.8;
+            attribute :>> attitudeKp = 4.25;
+            attribute :>> headingKp = 4.263;
+            attribute :>> velocityKp = 1.417;
+            attribute :>> velocityKi = 0.5018;
+            attribute :>> verticalKp = 2.5;
+            attribute :>> verticalKi = 1.562;
+            attribute :>> positionKp = 0.3542;
+        }
     }
 
     // ---------------------------------------------------------- behaviors
@@ -488,11 +581,6 @@ package DroneLibrary {
         attribute :>> distance;
         attribute :>> duration = distance / speed;
         attribute :>> groundSpeed = speed;
-        // each cruise profile states the speed it is cleared to fly at
-        requirement <'CRZ-01'> speedLimit : MaximumValue {
-            doc /* The cruise speed shall not exceed the cleared {maximum} m/s. */
-            attribute :>> actual = speed;
-        }
     }
     abstract #Behavior action def Hover :> DroneBehavior {
         doc /* Hold position, e.g. waiting for a landing zone to clear. */
@@ -513,6 +601,13 @@ package DroneLibrary {
         attribute altitude : Real;              // m
         attribute :>> duration = altitude / descentRate;
         attribute :>> verticalSpeed = -descentRate;
+    }
+    abstract #Behavior action def Turn :> DroneBehavior {
+        doc /* Turn on the spot to a new heading. */
+        in :>> powerFactor;
+        in yawRate : Real;                      // deg/s
+        attribute angle : Real;                 // deg
+        attribute :>> duration = angle / yawRate;
     }
     abstract #Behavior action def GroundRelease :> DroneBehavior {
         doc /* Release the parcel on the ground with the motors idle. */
@@ -550,20 +645,6 @@ package DroneLibrary {
         out figureOfMerit : Real;
     }
 
-    // ---------------------------------------------------------- tests
-    // A verification def is a test: its objective names the requirements it
-    // verifies, here a requirement usage reached through the subject.
-    verification def BatteryAcceptanceTest {
-        doc /* Incoming inspection: each pack is weighed and its capacity measured on a discharge bench. */
-        subject battery : Battery;
-        objective { verify battery.specificEnergy; }
-    }
-    verification def CruiseClearanceReview {
-        doc /* Flight-envelope review of each cruise profile against the speed it is cleared for. */
-        subject cruise : Cruise;
-        objective { verify cruise.speedLimit; }
-    }
-
     // ---------------------------------------------------------- behavior catalog
     // Performance profiles: every parameter set, so a system instance can perform them.
     package Behaviors {
@@ -573,30 +654,23 @@ package DroneLibrary {
             in :>> powerFactor = 1.3;
             in :>> climbRate = 2;
         }
-        action cruise10 : Cruise {
-            in :>> powerFactor = 1.05;
-            in :>> speed = 10;
-            requirement <'CRZ-01'> speedLimit :>> speedLimit { attribute :>> maximum = 12; }
-        }
-        action cruise12 : Cruise {
-            in :>> powerFactor = 1.1;
-            in :>> speed = 12;
-            requirement <'CRZ-01'> speedLimit :>> speedLimit { attribute :>> maximum = 14; }
-        }
-        action cruise15 : Cruise {
-            in :>> powerFactor = 1.2;
-            in :>> speed = 15;
-            requirement <'CRZ-01'> speedLimit :>> speedLimit { attribute :>> maximum = 15; }
-        }
+        action cruise10 : Cruise { in :>> powerFactor = 1.05; in :>> speed = 10; }
+        action cruise12 : Cruise { in :>> powerFactor = 1.1; in :>> speed = 12; }
+        action cruise15 : Cruise { in :>> powerFactor = 1.2; in :>> speed = 15; }
         action cruiseSport : Cruise {
             doc /* Speed profile still being flight-tested: no power factor yet */
             in :>> speed = 18;
-            requirement <'CRZ-01'> speedLimit :>> speedLimit { attribute :>> maximum = 16; }
         }
         action holdPosition : Hover { in :>> powerFactor = 1.0; }
         action winch1 : WinchLower { in :>> powerFactor = 1.05; in :>> winchSpeed = 1; }
         action landStandard : Land { in :>> powerFactor = 0.8; in :>> descentRate = 2; }
         action landGentle : Land { in :>> powerFactor = 0.85; in :>> descentRate = 1.5; }
         action releaseIdle : GroundRelease { in :>> powerFactor = 0.05; }
+        action turnStandard : Turn { in :>> powerFactor = 1.0; in :>> yawRate = 45; }
+        action turnGentle : Turn {
+            doc /* Slow turns for heavy lifters */
+            in :>> powerFactor = 1.0;
+            in :>> yawRate = 30;
+        }
     }
 }

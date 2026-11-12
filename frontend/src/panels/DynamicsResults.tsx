@@ -192,7 +192,7 @@ function PowerChart({ runs, color, focus, setFocus }: Props) {
 }
 
 // ------------------------------------------------------------------ component curves
-interface Point {
+export interface Point {
   label: string;
   x: number;
   y: number;
@@ -249,12 +249,20 @@ const MM = { top: 10, right: 12, bottom: 34, left: 50 };
 
 /** One measure against one x: the curve as a 2px line, operating points as
  *  ringed markers labelled with their behaviors, a crosshair that reads the
- *  curve, and a tooltip with the full operating point under the pointer. */
-function MiniChart({ title, unit, xLabel, curve, points, fmtX, fmtY }: { title: string; unit: string; xLabel: string; curve: { x: number; y: number }[]; points: Point[]; fmtX(v: number): string; fmtY(v: number): string }) {
+ *  curve, and a tooltip with the full operating point under the pointer.
+ *  An optional ``reference`` (a command, or a fitted model) is a muted line
+ *  under the curve; ``names`` name the two in the tooltip. */
+export function MiniChart({
+  title, unit, xLabel, curve, points, fmtX, fmtY, reference, names,
+}: {
+  title: string; unit: string; xLabel: string; curve: { x: number; y: number }[]; points: Point[]; fmtX(v: number): string; fmtY(v: number): string;
+  reference?: { x: number; y: number }[]; names?: [string, string];
+}) {
   const svg = useRef<SVGSVGElement>(null);
   const [hover, setHover] = useState<{ px: number; x: number; point: Point[] | null } | null>(null);
-  const xs = [...curve.map((c) => c.x), ...points.map((p) => p.x)];
-  const ys = [...curve.map((c) => c.y), ...points.map((p) => p.y)];
+  const ref = reference || [];
+  const xs = [...curve.map((c) => c.x), ...points.map((p) => p.x), ...ref.map((c) => c.x)];
+  const ys = [...curve.map((c) => c.y), ...points.map((p) => p.y), ...ref.map((c) => c.y)];
   const xt = ticks(floor0(xs), Math.max(...xs));
   const yt = ticks(floor0(ys), Math.max(...ys));
   const [x0, x1, y0, y1] = [xt[0], xt[xt.length - 1], yt[0], yt[yt.length - 1]];
@@ -282,12 +290,12 @@ function MiniChart({ title, unit, xLabel, curve, points, fmtX, fmtY }: { title: 
     let y = py - 6;
     while (placed.some((b) => b.x0 < x0 + w && x0 < b.x1 && Math.abs(b.y - y) < 12)) y += 12;
     placed.push({ x0, x1: x0 + w, y });
-    return { text, x: right ? px + 7 : px - 7, y, anchor: right ? "start" : "end" };
+    return { text, x: right ? px + 7 : px - 7, y, anchor: right ? ("start" as const) : ("end" as const) };
   });
-  const curveAt = (v: number) => {
-    const i = curve.findIndex((c) => c.x >= v);
-    if (i <= 0) return curve[Math.max(i, 0)]?.y ?? null;
-    const a = curve[i - 1], b = curve[i];
+  const curveAt = (v: number, line = curve) => {
+    const i = line.findIndex((c) => c.x >= v);
+    if (i <= 0) return line[Math.max(i, 0)]?.y ?? null;
+    const a = line[i - 1], b = line[i];
     return a.y + ((v - a.x) / (b.x - a.x || 1)) * (b.y - a.y);
   };
   const move = (e: React.PointerEvent) => {
@@ -306,7 +314,7 @@ function MiniChart({ title, unit, xLabel, curve, points, fmtX, fmtY }: { title: 
         <span className="strong small">{title}</span> <span className="muted small">{unit}</span>
       </div>
       <div className="chart-wrap">
-        <svg ref={svg} viewBox={`0 0 ${MW} ${MH}`} className="chart" onPointerMove={move} onPointerLeave={() => setHover(null)} role="img" aria-label={`${title} against ${xLabel}, with operating points ${points.map((p) => p.label).join(", ")}`}>
+        <svg ref={svg} viewBox={`0 0 ${MW} ${MH}`} className="chart" onPointerMove={move} onPointerLeave={() => setHover(null)} role="img" aria-label={`${title} against ${xLabel}${points.length ? `, with operating points ${points.map((p) => p.label).join(", ")}` : ""}`}>
           {yt.map((v) => (
             <g key={v}>
               <line x1={MM.left} x2={MW - MM.right} y1={Y(v)} y2={Y(v)} className="grid" />
@@ -323,6 +331,7 @@ function MiniChart({ title, unit, xLabel, curve, points, fmtX, fmtY }: { title: 
           <text x={MM.left + iw / 2} y={MH - 4} className="tick" textAnchor="middle">
             {xLabel}
           </text>
+          {ref.length > 0 && <polyline points={ref.map((c) => `${X(c.x).toFixed(1)},${Y(c.y).toFixed(1)}`).join(" ")} fill="none" className="ref-curve" strokeWidth={1.5} strokeLinejoin="round" />}
           <polyline points={curve.map((c) => `${X(c.x).toFixed(1)},${Y(c.y).toFixed(1)}`).join(" ")} fill="none" className="curve" strokeWidth={2} strokeLinejoin="round" />
           {hover && <line x1={X(hover.x)} x2={X(hover.x)} y1={MM.top} y2={MH - MM.bottom} className="crosshair" />}
           {groups.map((g, k) => (
@@ -349,7 +358,17 @@ function MiniChart({ title, unit, xLabel, curve, points, fmtX, fmtY }: { title: 
               ))
             ) : (
               <div className="small mono">
-                {xLabel.split(" (")[0]} {fmtX(hover.x)} → <span className="strong">{cy === null ? "—" : fmtY(cy)}</span>
+                {xLabel.split(" (")[0]} {fmtX(hover.x)} → {names ? `${names[0]} ` : ""}
+                <span className="strong">{cy === null ? "—" : fmtY(cy)}</span>
+                {ref.length > 0 && (
+                  <span className="muted">
+                    {" "}
+                    · {names ? names[1] : "reference"} {(() => {
+                      const r = curveAt(hover.x, ref);
+                      return r === null ? "—" : fmtY(r);
+                    })()}
+                  </span>
+                )}
               </div>
             )}
           </div>

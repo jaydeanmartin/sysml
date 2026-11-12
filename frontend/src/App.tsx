@@ -18,14 +18,14 @@ import { HistoryPanel } from "./panels/HistoryPanel";
 import { LibraryPanel } from "./panels/LibraryPanel";
 import { MissionsPanel } from "./panels/MissionsPanel";
 import { GeometryPanel } from "./panels/GeometryPanel";
+import { SpecificationPanel } from "./panels/SpecificationPanel";
 import { RequirementsPanel } from "./panels/RequirementsPanel";
-import { RequirementTreePanel } from "./panels/RequirementTreePanel";
 import { SNIPPETS } from "./snippets";
-import { ThemeSwitch } from "./theme";
+import { useTheme, type ThemePref } from "./theme";
 import type { Catalog, CatalogChange, Diagnostic, GNode, Graph, Loc, Located, Model, ModelSummary, ModelTemplate, Project, Run, RunRequest } from "./types";
 
-type Tab = "diagram" | "library" | "configurator" | "missions" | "geometry" | "requirements" | "reqtree" | "execute" | "analyses" | "history";
-const CATALOG_TABS: Tab[] = ["library", "configurator", "missions", "geometry", "reqtree"];
+type Tab = "diagram" | "library" | "configurator" | "missions" | "geometry" | "specification" | "requirements" | "execute" | "analyses" | "history";
+const CATALOG_TABS: Tab[] = ["library", "configurator", "missions", "geometry", "specification"];
 // [panel, label, icon, tooltip] in sidebar order
 const PANELS: [Tab, string, string, string][] = [
   ["diagram", "Diagram", "◫", "Structure, interconnection, requirement and behavior diagrams"],
@@ -33,8 +33,8 @@ const PANELS: [Tab, string, string, string][] = [
   ["configurator", "Configurator", "⚙", "Configure system instances from catalog components"],
   ["missions", "Missions", "⚑", "Plan missions as ordered behaviors and check them against system instances"],
   ["geometry", "3-D", "◈", "3-D geometry of system instances, generated from their components"],
+  ["specification", "Specification", "☰", "Requirement hierarchy: statements and instances of requirement types, checked for every system and component"],
   ["requirements", "Requirements", "✓", "Requirements, satisfy relations and verdicts"],
-  ["reqtree", "Req. hierarchy", "☷", "Requirements of a system instance in their hierarchy, with the tests that verify them"],
   ["execute", "Execute", "▶", "Run calcs, analyses, actions and state machines"],
   ["analyses", "Analyses", "ƒ", "REST analyses the model can call"],
   ["history", "History", "⟲", "Versions and runs of the model"],
@@ -508,6 +508,7 @@ export default function App() {
           </button>
         </label>
         <div className="grow" />
+        <ThemeSwitch />
         <div className={`status ${errors.length ? "bad" : "ok"}`}>
           {parsing ? "Interpreting…" : errors.length ? `✗ ${errors.length} error${errors.length > 1 ? "s" : ""}` : "✓ Valid SysML v2"}
         </div>
@@ -515,7 +516,6 @@ export default function App() {
         <button className="primary" onClick={save} disabled={!dirty || saving}>
           {saving ? "Saving…" : dirty ? "Save" : `Saved v${saved?.headVersion ?? "–"}`}
         </button>
-        <ThemeSwitch />
       </header>
 
       <div className="workspace">
@@ -625,10 +625,10 @@ export default function App() {
               <>
                 {tab === "library" ? (
                   <LibraryPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
+                ) : tab === "specification" ? (
+                  <SpecificationPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
                 ) : tab === "geometry" ? (
                   <GeometryPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
-                ) : tab === "reqtree" ? (
-                  <RequirementTreePanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} focus={selected ? nodesById.get(selected)?.qualifiedName : null} />
                 ) : tab === "missions" ? (
                   <MissionsPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
                 ) : (
@@ -719,6 +719,33 @@ export default function App() {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+const THEMES: [ThemePref, string, string][] = [
+  ["light", "☀", "Light"],
+  ["system", "◐", "Follow the system setting"],
+  ["dark", "☾", "Dark"],
+];
+
+/** Light, dark, or whatever the operating system prefers. */
+function ThemeSwitch() {
+  const { pref, theme, setPref } = useTheme();
+  return (
+    <div className="seg small-seg theme-switch" role="radiogroup" aria-label="Colour theme">
+      {THEMES.map(([p, icon, label]) => (
+        <button
+          key={p}
+          role="radio"
+          aria-checked={pref === p}
+          className={pref === p ? "on" : ""}
+          title={p === "system" ? `${label} (now ${theme})` : label}
+          onClick={() => setPref(p)}
+        >
+          {icon}
+        </button>
+      ))}
     </div>
   );
 }

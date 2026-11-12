@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import Any
 
 G = 9.81            # m/s², standard gravity
@@ -486,3 +487,63 @@ def simulate(i: Inputs) -> dict[str, Any]:
         "reference": {"hoverRpm": hover, "propDiameter": D, "airDensity": rho, "batteryVoltage": i.batteryVoltage, "motorMaxCurrent": motor.i_max},
         "timeline": timeline,
     }
+
+
+# ------------------------------------------------------------------ one component's curves
+PROPELLER_PARAMS = ("ct0", "ct1", "ct2", "cp0", "cp1", "cp2")
+MOTOR_PARAMS = ("kv", "resistance", "noLoadCurrent", "maxCurrent")
+
+
+def component_curves(component: str, values: dict[str, Any], voltage: float | None = None) -> dict[str, Any]:
+    """Performance curves of one propeller or motor, exactly as the simulation
+    uses them, from its SysML attribute values (``PROPELLER_PARAMS`` or
+    ``MOTOR_PARAMS``). A motor's full-throttle curves need the supply
+    ``voltage``. Returns the curves and a few headline figures."""
+
+    def get(name: str) -> float:
+        v = values.get(name)
+        if isinstance(v, bool) or v is None:
+            raise SimulationError(f"{component} has no {name}")
+        try:
+            x = float(v)
+        except (TypeError, ValueError) as exc:
+            raise SimulationError(f"{name} is not a number") from exc
+        if not math.isfinite(x):
+            raise SimulationError(f"{name} must be finite")
+        return x
+
+    if component == "propeller":
+        # the coefficients are dimensionless, so diameter and air density do not change the curves
+        prop = Propeller(SimpleNamespace(propDiameter=1.0, airDensity=1.225, **{k: get(k) for k in PROPELLER_PARAMS}))
+        curves = prop.curves()
+        best = max(curves, key=lambda c: c["efficiency"])
+        return {
+            "curves": curves,
+            "summary": {
+                "zeroThrustJ": prop.j_max,
+                "staticCT": prop.CT(0.0),
+                "staticCP": prop.CP(0.0),
+                "staticCTCP": prop.CT(0.0) / prop.CP(0.0),
+                "maxEfficiency": best["efficiency"],
+                "maxEfficiencyJ": best["J"],
+            },
+        }
+    if component == "motor":
+        if voltage is None or not voltage > 0:
+            raise SimulationError("a motor's curves need a positive supply voltage")
+        p = {k: get(k) for k in MOTOR_PARAMS}
+        motor = Motor(SimpleNamespace(motorKv=p["kv"], motorResistance=p["resistance"], motorNoLoadCurrent=p["noLoadCurrent"], motorMaxCurrent=p["maxCurrent"]))
+        curves = motor.curves(voltage)
+        best = max(curves, key=lambda c: c["efficiency"])
+        return {
+            "curves": curves,
+            "summary": {
+                "voltage": voltage,
+                "noLoadSpeed": p["kv"] * voltage,             # rpm, ideal (no load, no losses)
+                "stallCurrent": voltage / p["resistance"] if p["resistance"] > 0 else None,
+                "maxShaftPower": max(c["power"] for c in curves),
+                "maxEfficiency": best["efficiency"],
+                "maxEfficiencyCurrent": best["current"],
+            },
+        }
+    raise SimulationError(f"unknown component '{component}': propeller or motor")

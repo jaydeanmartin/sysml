@@ -2,57 +2,48 @@ package DroneMissions {
     private import ScalarValues::*;
     private import DroneLibrary::*;
     private import DroneArchitectures::*;
+    private import DroneRequirements::Types::*;
     private import AnalysisTooling::*;
 
     // ---------------------------------------------------------- marker
-    // The Missions tab configures missions of #Mission action defs.
+    // The Missions tab configures missions of #Mission use case defs.
     metadata def Mission {
-        doc /* A mission type. Its missions are ordered lists of behaviors; each attribute is a total over the steps. */
+        doc /* A mission type: a use case whose subject is the system that flies it. Its missions are ordered lists of behaviors; each attribute is a total over the steps; the requirements in its objective apply to every system a mission of it is assigned to. */
     }
 
     // ---------------------------------------------------------- mission type
-    #Mission action def DeliveryMission {
+    #Mission use case def DeliveryMission {
         doc /* Out-and-back parcel delivery. */
+        subject drone : DeliveryDrone;
         // totals: each is the sum of the same attribute over the steps, as a drone flies them
         attribute duration : Real;
         attribute distance : Real;
         attribute hoverTime : Real;
-        // every mission states the delivery window promised to its customers
-        requirement <'MSN-06'> deliveryWindow : MissionTimeLimit;
-    }
-
-    // ---------------------------------------------------------- mission requirements
-    // A requirement def with in parameters is a mission requirement, checked by
-    // the Missions tab for every system instance and mission. Its parameters
-    // are supplied by the mission simulation that verifies it (see below);
-    // a requirement no simulation verifies takes the mission totals of the
-    // same names instead, summed over the steps as the system flies them.
-    requirement def <'MSN-01'> MissionEnergyRequirement {
-        doc /* The drone shall fly the mission on one charge, keeping a 20 % battery reserve. */
-        subject drone : DeliveryDrone;
-        in energyPercent : Real;                // of the battery's energy, used by the mission
-        attribute reserve : Real = 0.2;
-        require constraint { energyPercent <= 100 * (1 - reserve) }
-    }
-    requirement def <'MSN-02'> MissionTimeRequirement {
-        doc /* A delivery mission shall take at most 30 minutes. */
-        subject drone : DeliveryDrone;
-        in missionTime : Real;                  // s
-        require constraint { missionTime <= 1800 }
-    }
-    // An abstract mission requirement: each mission states its own limit.
-    abstract requirement def <'LIB-03'> MissionTimeLimit {
-        doc /* The mission shall be flown within its {maxTime} s delivery window. */
-        subject drone : DeliveryDrone;
-        in missionTime : Real;                  // s, from the simulation that verifies it
-        attribute maxTime : Real;
-        require constraint { missionTime <= maxTime }
-    }
-    requirement def <'MSN-03'> MissionEnduranceEstimate {
-        doc /* Design-time estimate: the mission's hover-equivalent time, at full takeoff mass, shall fit in the drone's hover endurance. */
-        subject drone : DeliveryDrone;
-        in hoverTime : Real;                    // a mission total
-        require constraint { hoverTime <= drone.endurance * 60 }
+        // the requirements every delivery mission puts on the drone that flies it;
+        // a mission adds its own by redefining the objective
+        objective deliveryGoals {
+            doc /* A delivery shall be flown safely on one charge, in time. */
+            requirement <'MIS-1'> energy : MissionEnergy {
+                doc /* The drone shall fly the mission on one charge, keeping a 20 % battery reserve. */
+                attribute :>> reserve = 0.2;
+            }
+            requirement <'MIS-2'> time : MissionTime {
+                doc /* A delivery mission shall take at most 30 minutes. */
+                attribute :>> limit = 1800;
+            }
+            requirement <'MIS-3'> enduranceEstimate : MissionEnduranceEstimate {
+                doc /* The mission's hover-equivalent time at full mass shall fit in the hover endurance. */
+                attribute :>> maxFraction = 1.0;
+            }
+            requirement <'MIS-4'> peakPower : MissionPeakPower {
+                doc /* The battery shall supply the peak power of the mission. */
+                attribute :>> margin = 0;
+            }
+            requirement <'MIS-5'> throttleHeadroom : ThrottleHeadroom {
+                doc /* The motors shall keep a 20 % throttle margin in every behavior. */
+                attribute :>> limit = 0.8;
+            }
+        }
     }
 
     // ---------------------------------------------------------- mission simulation
@@ -78,9 +69,8 @@ package DroneMissions {
         out missionTime : Real;                                             // s
         out endStateOfCharge : Real;                                        // %
         objective {
-            verify requirement energy : MissionEnergyRequirement;
-            verify requirement time : MissionTimeRequirement;
-            verify requirement window : MissionTimeLimit;
+            verify requirement energy : MissionEnergy;
+            verify requirement time : MissionTime;
         }
     }
 
@@ -91,18 +81,6 @@ package DroneMissions {
     // motor's torque, speed and efficiency, and the battery's voltage sag.
     // It reports the energy and power of every behavior, and verifies the
     // requirements that need those dynamics. Still air, constant air density.
-    requirement def <'MSN-04'> MissionPeakPowerRequirement {
-        doc /* Across the mission, including acceleration transients, the electrical power shall stay within the battery's maximum power. */
-        subject drone : DeliveryDrone;
-        in peakPower : Real;                    // W
-        require constraint { peakPower <= drone.battery.maxPower }
-    }
-    requirement def <'MSN-05'> ThrottleHeadroomRequirement {
-        doc /* The motors shall keep a 20 % throttle margin for control in every behavior of the mission. */
-        subject drone : DeliveryDrone;
-        in maxThrottle : Real;                  // motor voltage / bus voltage
-        require constraint { maxThrottle <= 0.8 }
-    }
     verification def DynamicSimulation {
         doc /* Propulsion dynamics: propeller CT, CP against advance ratio, brushless motor model, drag, acceleration transients and battery sag. */
         metadata ToolExecution { toolName = "dynamicsSimulator"; uri = "analysis://dynamicsSimulator"; }
@@ -131,30 +109,31 @@ package DroneMissions {
         out peakPower : Real;                                               // W
         out maxThrottle : Real;
         objective {
-            verify requirement peak : MissionPeakPowerRequirement;
-            verify requirement headroom : ThrottleHeadroomRequirement;
+            verify requirement peak : MissionPeakPower;
+            verify requirement headroom : ThrottleHeadroom;
         }
     }
 
     // ---------------------------------------------------------- missions
-    // Created and edited from the Missions tab. Each step is an abstract
-    // behavior with its quantities set; a drone flies it with the behavior it
-    // performs for that type (its speed, climb rate, power factor...).
+    // Created and edited from the Missions tab. Each mission is a use case of
+    // its mission type; each step is an abstract behavior with its quantities
+    // set; a drone flies it with the behavior it performs for that type (its
+    // speed, climb rate, power factor...).
     package Missions {
-        action shortHop : DeliveryMission {
+        use case shortHop : DeliveryMission {
             doc /* 2 km each way, land and drop off */
             first start;
             then action takeoff : Takeoff { attribute :>> altitude = 30; }
             then action cruise : Cruise { attribute :>> distance = 2000; }
             then action land : Land { attribute :>> altitude = 30; }
             then action groundRelease : GroundRelease { attribute :>> duration = 30; }
+            then action turn : Turn { attribute :>> angle = 180; }
             then action takeoff_2 : Takeoff { attribute :>> altitude = 30; }
             then action cruise_2 : Cruise { attribute :>> distance = 2000; }
             then action land_2 : Land { attribute :>> altitude = 30; }
             then done;
-            requirement <'MSN-06'> deliveryWindow :>> deliveryWindow { attribute :>> maxTime = 600; }
         }
-        action suburban : DeliveryMission {
+        use case suburban : DeliveryMission {
             doc /* 5 km each way, wait for the landing zone, drop off */
             first start;
             then action takeoff : Takeoff { attribute :>> altitude = 60; }
@@ -162,35 +141,55 @@ package DroneMissions {
             then action hover : Hover { attribute :>> duration = 30; }
             then action land : Land { attribute :>> altitude = 60; }
             then action groundRelease : GroundRelease { attribute :>> duration = 30; }
+            then action turn : Turn { attribute :>> angle = 180; }
             then action takeoff_2 : Takeoff { attribute :>> altitude = 60; }
             then action cruise_2 : Cruise { attribute :>> distance = 5000; }
             then action land_2 : Land { attribute :>> altitude = 60; }
             then done;
-            requirement <'MSN-06'> deliveryWindow :>> deliveryWindow { attribute :>> maxTime = 1080; }
         }
-        action winchDrop : DeliveryMission {
+        use case winchDrop : DeliveryMission {
             doc /* 4 km each way, lower the parcel to a balcony without landing */
             first start;
             then action takeoff : Takeoff { attribute :>> altitude = 60; }
             then action cruise : Cruise { attribute :>> distance = 4000; }
             then action winchLower : WinchLower { attribute :>> depth = 20; }
+            then action turn : Turn { attribute :>> angle = 180; }
             then action cruise_2 : Cruise { attribute :>> distance = 4000; }
             then action land : Land { attribute :>> altitude = 60; }
             then done;
-            requirement <'MSN-06'> deliveryWindow :>> deliveryWindow { attribute :>> maxTime = 1200; }
         }
-        action rural : DeliveryMission {
+        use case rural : DeliveryMission {
             doc /* 8 km each way to a farm, drop off */
+            objective :>> deliveryGoals {
+                requirement <'MIS-R1'> farmWindow : MissionTime {
+                    doc /* The farm accepts deliveries in a 25-minute window: the round trip shall fit in it. */
+                    attribute :>> limit = 1500;
+                }
+            }
             first start;
             then action takeoff : Takeoff { attribute :>> altitude = 60; }
             then action cruise : Cruise { attribute :>> distance = 8000; }
             then action land : Land { attribute :>> altitude = 60; }
             then action groundRelease : GroundRelease { attribute :>> duration = 30; }
+            then action turn : Turn { attribute :>> angle = 180; }
             then action takeoff_2 : Takeoff { attribute :>> altitude = 60; }
             then action cruise_2 : Cruise { attribute :>> distance = 8000; }
             then action land_2 : Land { attribute :>> altitude = 60; }
             then done;
-            requirement <'MSN-06'> deliveryWindow :>> deliveryWindow { attribute :>> maxTime = 1800; }
         }
+    }
+
+    // ---------------------------------------------------------- assignments
+    // Which drone flies which mission: an allocation of the mission to the system
+    // instance. The mission's requirements (its type's objective and its own)
+    // then apply to that drone. Edited from the Missions tab.
+    package Assignments {
+        allocate Missions::shortHop to DroneArchitectures::Configurations::courier;
+        allocate Missions::shortHop to DroneArchitectures::Configurations::parcel;
+        allocate Missions::suburban to DroneArchitectures::Configurations::parcel;
+        allocate Missions::rural to DroneArchitectures::Configurations::parcelLongRange;
+        allocate Missions::suburban to DroneArchitectures::Configurations::regional;
+        allocate Missions::suburban to DroneArchitectures::Configurations::regionalLiIon;
+        allocate Missions::winchDrop to DroneArchitectures::Configurations::heavyLift;
     }
 }

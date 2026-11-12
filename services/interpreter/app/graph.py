@@ -398,6 +398,7 @@ class GraphBuilder:
             "kind": kind,
             "metatype": t,
             "name": self._name(el),
+            "shortName": el.get("declaredShortName"),
             "qualifiedName": el.get("qualifiedName"),
             "owner": self._node_owner(el),
             "loc": self._loc(el),
@@ -411,8 +412,6 @@ class GraphBuilder:
             "header": header[:300],
             "redefines": _ref(el.get("redefines")),
         }
-        if el.get("declaredShortName"):
-            node["shortName"] = el["declaredShortName"]  # <'REQ-1'>: a requirement's id
         if tool:
             node["tool"] = tool
         self.nodes[el["@id"]] = node
@@ -540,15 +539,14 @@ class GraphBuilder:
         if rs:
             req = _ref(rs.get("referencedFeature"))
         req = req or _ref(el.get("subsets")) or _ref(el.get("satisfiedRequirement"))
-        if req not in self.nodes:
-            # a requirement usage reached through a chain such as `drone.endurance`:
-            # the edge goes to the usage the chain ends at
-            target = self.by_id.get(req or "")
-            if target and target.get("chainingFeature"):
-                req = _refs(target["chainingFeature"])[-1]
         if kind == "verify" and req not in self.nodes:
             # a verified requirement declared by its definition: the edge goes to the def
             req = next((r for r in _refs(el.get("type")) if r in self.nodes), req)
+        if req not in self.nodes:
+            # a nested requirement written as a chain, e.g. `satisfy parent.child by x`
+            chain = self.by_id.get(req or "")
+            if chain and chain.get("chainingFeature"):
+                req = _refs(chain["chainingFeature"])[-1]
         by = _ref(el.get("subject")) or _ref(el.get("satisfyingFeature"))
         if kind == "verify":
             by = self._context(el)

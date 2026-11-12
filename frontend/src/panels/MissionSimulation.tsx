@@ -2,12 +2,15 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
 import { isDynamics, type DynamicsOutputs, type MissionSimulationDef, type SimulationOutputs, type SimulationResult, type SimulationRun, type StepRequest, type SystemConfiguration } from "../types";
 import { errorText, short } from "./catalogUtil";
+import { useTheme } from "../theme";
 import { DynamicsDetails } from "./DynamicsResults";
 
 /** Categorical slots in fixed order (validated: adjacent CVD ΔE ≥ 9.1 on white).
  *  Three sit below 3:1 contrast, so identity is also carried by the legend,
  *  the table and the tooltip. A system keeps its slot whatever is shown. */
 export const SERIES = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948"];
+/** The same hues stepped for the dark surface (validated on #171d26: adjacent CVD ΔE >= 8.4, all >= 3:1). */
+export const SERIES_DARK = ["#3987e5", "#d95926", "#199e70", "#c98500", "#d55181", "#008300", "#9085e9", "#e66767"];
 
 const W = 720;
 const H = 260;
@@ -19,8 +22,6 @@ interface Props {
   /** a saved mission, or null to simulate the draft steps */
   mission: string | null;
   draft: StepRequest[] | null;
-  /** the draft's requirement values */
-  draftRequirements?: Record<string, string> | null;
   label: string;
   /** every system instance of the project, in catalog order (fixes each one's color) */
   systems: SystemConfiguration[];
@@ -35,7 +36,7 @@ interface Props {
 /** Runs the mission simulation (an external analysis, through the model service)
  *  for every system instance that can fly the mission and shows battery energy,
  *  percent of the pack, mission time and the state of charge over time. */
-export function MissionSimulation({ projectId, missionType, mission, draft, draftRequirements, label, systems, simulations, ensureSaved, refreshKey, disabled }: Props) {
+export function MissionSimulation({ projectId, missionType, mission, draft, label, systems, simulations, ensureSaved, refreshKey, disabled }: Props) {
   const [simQn, setSimQn] = useState<string | null>(simulations[0]?.qualifiedName ?? null);
   const simDef = simulations.find((s) => s.qualifiedName === simQn) || simulations[0];
   const [res, setRes] = useState<SimulationResult | null>(null);
@@ -43,15 +44,16 @@ export function MissionSimulation({ projectId, missionType, mission, draft, draf
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [focus, setFocus] = useState<string | null>(null);
-  const key = `${simDef?.qualifiedName}|${mission || `draft:${JSON.stringify(draft)}${JSON.stringify(draftRequirements || {})}`}`;
-  const color = (qn: string) => SERIES[Math.max(0, systems.findIndex((s) => s.qualifiedName === qn)) % SERIES.length];
+  const key = `${simDef?.qualifiedName}|${mission || `draft:${JSON.stringify(draft)}`}`;
+  const series = useTheme().theme === "dark" ? SERIES_DARK : SERIES;
+  const color = (qn: string) => series[Math.max(0, systems.findIndex((s) => s.qualifiedName === qn)) % series.length];
 
   const run = async () => {
     if (!(await ensureSaved())) return;
     setBusy(true);
     setError(null);
     try {
-      setRes(await api.simulateMission(projectId, { missionType, simulation: simDef?.qualifiedName ?? null, mission, draft: mission ? null : draft, draftRequirements: mission ? null : draftRequirements, systems: null }));
+      setRes(await api.simulateMission(projectId, { missionType, simulation: simDef?.qualifiedName ?? null, mission, draft: mission ? null : draft, systems: null }));
       setForKey(key);
     } catch (e) {
       setError(errorText(e));
@@ -141,6 +143,14 @@ export function MissionSimulation({ projectId, missionType, mission, draft, draf
                     <tr key={qn} className={focus === qn ? "row-on" : ""} onMouseEnter={() => setFocus(qn)} onMouseLeave={() => setFocus(null)}>
                       <td className="nowrap">
                         <span className="legend-key" style={{ background: color(qn) }} /> <span className="mono strong">{short(qn)}</span>
+                        {r.resultId && (
+                          <div className="small">
+                            <a href={api.resultUrl(r.resultId)} target="_blank" rel="noreferrer" title={`Stored result ${r.resultId}${r.reused ? ": outputs reused from an earlier result with the same inputs" : ""}`}>
+                              data ↗
+                            </a>
+                            {r.reused && <span className="muted"> · reused</span>}
+                          </div>
+                        )}
                       </td>
                       <td className="mono num">
                         {o.energyUsed.toFixed(0)} <span className="muted">/ {Number(r.inputs?.batteryEnergy ?? 0).toFixed(0)} Wh</span>

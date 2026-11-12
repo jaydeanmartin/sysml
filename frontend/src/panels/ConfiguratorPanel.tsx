@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import type { Architecture, CatalogChange, ComponentInstance, SystemConfiguration } from "../types";
+import { ControlPanel } from "./ControlPanel";
 import { NAME_RE, errorText, partText, ref, short, type CatalogPanelProps } from "./catalogUtil";
-import { missingValues, ownValues, RequirementValues, requirementLines } from "./RequirementValues";
+import { reqLabel, useComponentChecks } from "./componentChecks";
 
 interface Draft {
   name: string;
@@ -11,8 +12,6 @@ interface Draft {
   assignments: Record<string, string | null>;
   /** behavior slot -> behavior instance performed */
   behaviors: Record<string, string | null>;
-  /** requirement value ("usage.attribute") -> number */
-  requirements: Record<string, string>;
   /** qualified name of the system instance being edited; null for a new one */
   replace: string | null;
 }
@@ -37,6 +36,7 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
   const [busy, setBusy] = useState(false);
   const [evaluating, setEvaluating] = useState(false);
   const [evals, setEvals] = useState<Record<string, Evaluation>>({});
+  const compChecks = useComponentChecks(projectId, catalog);
 
   const archs = catalog?.architectures || [];
   const arch = archs.find((a) => a.qualifiedName === archQn) || archs[0];
@@ -44,6 +44,30 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
   const instById = useMemo(() => new Map((catalog?.instances || []).map((i) => [i.id, i])), [catalog]);
   const instByQn = useMemo(() => new Map((catalog?.instances || []).map((i) => [i.qualifiedName, i])), [catalog]);
   const evaluation = arch ? evals[arch.qualifiedName] : undefined;
+  // what the comparison checks: requirement defs that apply to every system of the
+  // architecture, and the specification's system-level instances that apply to some
+  const checks = useMemo(() => {
+    if (!arch || !catalog) return [];
+    const mine = new Set(configs.map((c) => c.qualifiedName));
+    return [
+      ...arch.requirements.map((q) => ({
+        key: q, label: short(q), sub: "", doc: catalog.requirements.find((x) => x.qualifiedName === q)?.doc || q, applies: (_: string) => true,
+      })),
+      ...catalog.specification
+        .filter((r) => r.level === "system" && r.type && !r.measured.length && r.appliesTo.some((q) => mine.has(q)))
+        .map((r) => ({
+          key: r.qualifiedName,
+          label: r.shortName || r.name,
+          sub: r.name,
+          doc: [
+            r.doc,
+            r.explicit ? `Applies to ${r.appliesTo.map(short).join(", ")} (satisfy).` : "",
+            ...Object.entries(r.replacedFor || {}).map(([subj, by]) => `Not for ${short(subj)}: it satisfies ${short(by)} instead.`),
+          ].filter(Boolean).join("\n"),
+          applies: (q: string) => r.appliesTo.includes(q),
+        })),
+    ];
+  }, [arch, catalog, configs]);
 
   const blank = (a: Architecture): Draft => {
     const base = lowerFirst(a.name);
@@ -55,7 +79,6 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
       package: "",
       assignments: Object.fromEntries(a.slots.map((s) => [s.name, null])),
       behaviors: Object.fromEntries(a.behaviors.map((b) => [b.name, null])),
-      requirements: {},
       replace: null,
     };
   };
@@ -65,7 +88,6 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
     package: c.package || "",
     assignments: { ...c.assignments },
     behaviors: { ...c.behaviors },
-    requirements: ownValues(c.requirementUsages),
     replace: c.qualifiedName,
   });
 
@@ -113,7 +135,6 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
         package: draft.replace ? null : draft.package || null,
         assignments: draft.assignments,
         behaviors: draft.behaviors,
-        requirements: draft.requirements,
         replace: draft.replace,
       })
     );
@@ -140,7 +161,7 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
         const exprs: { cfg: string; key: string; req?: boolean; text: string }[] = [];
         for (const c of cs) {
           for (const a of arch.attributes) exprs.push({ cfg: c.qualifiedName, key: a.name, text: `${c.qualifiedName}.${a.name}` });
-          for (const r of arch.requirements) exprs.push({ cfg: c.qualifiedName, key: r, req: true, text: `${r}(${c.qualifiedName})` });
+          for (const r of checks) if (r.applies(c.qualifiedName)) exprs.push({ cfg: c.qualifiedName, key: r.key, req: true, text: `${r.key}(${c.qualifiedName})` });
         }
         const runRes = await api.run(modelId, { kind: "evaluate", expression: exprs.map((e) => e.text).join("\n"), trace: false });
         const got = new Map((runRes.result?.checks || []).map((ch) => [ch.subject, ch.values[0]?.value]));
@@ -194,7 +215,6 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
           [
             ...arch.slots.filter((s) => draft.assignments[s.name]).map((s) => `part :>> ${s.name} :> ${ref(draft.assignments[s.name]!, scope)};`),
             ...arch.behaviors.filter((b) => draft.behaviors[b.name]).map((b) => `perform action :>> ${b.name} :> ${ref(draft.behaviors[b.name]!, scope)};`),
-            ...requirementLines(draft.requirements, arch.requirementUsages),
           ],
           draft.doc
         )
@@ -206,9 +226,7 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
     draft.name !== current.name ||
     draft.doc !== (current.doc || "") ||
     arch!.slots.some((s) => (draft.assignments[s.name] || null) !== (current.assignments[s.name] || null)) ||
-    arch!.behaviors.some((b) => (draft.behaviors[b.name] || null) !== (current.behaviors[b.name] || null)) ||
-    JSON.stringify(draft.requirements) !== JSON.stringify(ownValues(current.requirementUsages));
-  const reqMissing = arch && draft ? missingValues(arch.requirementUsages, draft.requirements) : [];
+    arch!.behaviors.some((b) => (draft.behaviors[b.name] || null) !== (current.behaviors[b.name] || null));
   // every behavior the architecture performs needs a complete behavior instance
   const unperformed = arch && draft ? arch.behaviors.filter((b) => !draft.behaviors[b.name]).map((b) => b.name) : [];
 
@@ -314,8 +332,13 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
                   </thead>
                   <tbody>
                     {arch.slots.map((s) => {
-                      const cands = s.candidates.map((id) => instById.get(id)).filter((i): i is ComponentInstance => !!i);
+                      // instances that fail a component requirement are greyed and listed last (still selectable)
+                      const cands = s.candidates
+                        .map((id) => instById.get(id))
+                        .filter((i): i is ComponentInstance => !!i)
+                        .sort((a, b) => Number(compChecks.failing(a.qualifiedName).length > 0) - Number(compChecks.failing(b.qualifiedName).length > 0));
                       const chosen = draft.assignments[s.name] ? instByQn.get(draft.assignments[s.name]!) : undefined;
+                      const chosenFails = compChecks.failing(chosen?.qualifiedName);
                       return (
                         <tr key={s.name}>
                           <td>
@@ -328,14 +351,32 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
                           <td>
                             <select value={draft.assignments[s.name] || ""} onChange={(e) => setDraft({ ...draft, assignments: { ...draft.assignments, [s.name]: e.target.value || null } })}>
                               <option value="">{cands.length ? "— choose —" : "— no instance fits —"}</option>
-                              {cands.map((i) => (
-                                <option key={i.id} value={i.qualifiedName}>
-                                  {i.name}
-                                  {i.component !== s.type ? ` (${short(i.component)})` : ""}
-                                  {i.doc ? ` — ${i.doc}` : ""}
-                                </option>
-                              ))}
+                              {cands.map((i) => {
+                                const bad = compChecks.failing(i.qualifiedName);
+                                return (
+                                  <option
+                                    key={i.id}
+                                    value={i.qualifiedName}
+                                    className={bad.length ? "noncompliant" : ""}
+                                    title={bad.length ? `Fails ${bad.map((c) => reqLabel(c.requirement)).join(", ")}` : undefined}
+                                  >
+                                    {bad.length ? "✗ " : ""}
+                                    {i.name}
+                                    {i.component !== s.type ? ` (${short(i.component)})` : ""}
+                                    {bad.length ? ` — fails ${bad.map((c) => c.requirement.shortName || c.requirement.name).join(", ")}` : i.doc ? ` — ${i.doc}` : ""}
+                                  </option>
+                                );
+                              })}
                             </select>
+                            {chosenFails.length > 0 && (
+                              <div className="small">
+                                {chosenFails.map((c) => (
+                                  <span key={c.requirement.qualifiedName} className="pill bad" title={c.requirement.doc || undefined}>
+                                    ✗ {reqLabel(c.requirement)}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
                           </td>
                           <td className="mono small muted">
                             {chosen
@@ -401,14 +442,12 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
                     </tbody>
                   </table>
                 )}
-                <RequirementValues usages={arch.requirementUsages} values={draft.requirements} what="system instance" onChange={(requirements) => setDraft({ ...draft, requirements })} />
                 <code className="block">{preview}</code>
                 <div className="row-end">
-                  {reqMissing.length > 0 && <span className="hint">State the requirement values: {reqMissing.join(", ")}.</span>}
                   {unperformed.length > 0 && <span className="hint">Choose a behavior for {unperformed.join(", ")}: a {arch.name} must perform every behavior.</span>}
                   {open > 0 && <span className="hint">{open} slot{open > 1 ? "s" : ""} left open (kept as the architecture declares {open > 1 ? "them" : "it"}).</span>}
                   {draft.replace && changed && <button onClick={() => current && setDraft(fromConfig(current))}>Revert</button>}
-                  <button className="primary" disabled={busy || !NAME_RE.test(draft.name) || !changed || unperformed.length > 0 || reqMissing.length > 0} onClick={save}>
+                  <button className="primary" disabled={busy || !NAME_RE.test(draft.name) || !changed || unperformed.length > 0} onClick={save}>
                     {busy ? "Saving…" : draft.replace ? "Save system instance" : "Create system instance"}
                   </button>
                 </div>
@@ -440,10 +479,10 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
                           {a.name}
                         </th>
                       ))}
-                      {arch.requirements.map((r) => (
-                        <th key={r} title={catalog.requirements.find((x) => x.qualifiedName === r)?.doc || r}>
-                          {catalog.requirements.find((x) => x.qualifiedName === r)?.shortId && <div className="req-id">{catalog.requirements.find((x) => x.qualifiedName === r)?.shortId}</div>}
-                          {short(r)}
+                      {checks.map((r) => (
+                        <th key={r.key} title={r.doc}>
+                          {r.label}
+                          {r.sub && <div className="muted small">{r.sub}</div>}
                         </th>
                       ))}
                     </tr>
@@ -454,6 +493,10 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
                         <td>
                           <div className="mono strong">{c.name}</div>
                           {c.doc && <div className="muted small">{c.doc}</div>}
+                          {(() => {
+                            const flies = catalog.missions.filter((m) => m.assignedTo.includes(c.qualifiedName)).map((m) => m.name);
+                            return flies.length ? <div className="small" title="Missions assigned to this system: their requirements apply to it">✈ {flies.join(", ")}</div> : null;
+                          })()}
                         </td>
                         {arch.slots.map((s) => (
                           <td key={s.name} className="mono small">
@@ -470,10 +513,16 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
                             {formatValue(evaluation?.values[c.qualifiedName]?.[a.name])}
                           </td>
                         ))}
-                        {arch.requirements.map((r) => {
-                          const v = evaluation?.verdicts[c.qualifiedName]?.[r];
+                        {checks.map((r) => {
+                          if (!r.applies(c.qualifiedName))
+                            return (
+                              <td key={r.key} className="muted small" title="This requirement does not apply to this system (its satisfy relations name others)">
+                                n/a
+                              </td>
+                            );
+                          const v = evaluation?.verdicts[c.qualifiedName]?.[r.key];
                           return (
-                            <td key={r}>
+                            <td key={r.key}>
                               {v ? <span className={`pill ${v === "holds" ? "ok" : "bad"}`}>{v === "holds" ? "✓ holds" : v === "fails" ? "✗ fails" : "? error"}</span> : <span className="muted">—</span>}
                             </td>
                           );
@@ -486,8 +535,18 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
             ) : (
               <div className="muted small">No system instances of {arch.name} yet — fill the slots above and create one.</div>
             )}
-            {!evaluation && configs.length > 0 && <div className="hint">Evaluate to compute {arch.attributes.map((a) => a.name).join(", ") || "the attributes"}{arch.requirements.length ? " and check the requirements" : ""} for every system instance.</div>}
+            {!evaluation && configs.length > 0 && <div className="hint">Evaluate to compute {arch.attributes.map((a) => a.name).join(", ") || "the attributes"}{checks.length ? " and check the requirements" : ""} for every system instance.</div>}
             {evaluation && evaluation.errors.length > 0 && <div className="error-box">{evaluation.errors.join("\n")}</div>}
+            <ControlPanel
+              projectId={projectId}
+              catalog={catalog}
+              arch={arch}
+              selected={selQn}
+              onSelect={setSelQn}
+              ensureSaved={ensureSaved}
+              onChange={onChange}
+              onOpen={onOpen}
+            />
           </div>
         )}
       </div>

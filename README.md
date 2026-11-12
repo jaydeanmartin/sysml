@@ -18,7 +18,7 @@ flowchart LR
   MS -->|parse / execute| IS
   IS -->|spawns| OS[["OpenSysML sysml CLI<br/>(Go, SysML v2 + KerML)"]]
   OS -->|ToolExecution → bridge.py| AS
-  AS -->|kind=external| SIM["mission simulator :8011<br/>(missionSimulator, dynamicsSimulator)"]
+  AS -->|kind=external| SIM["mission simulator :8011<br/>(missionSimulator, dynamicsSimulator,<br/>componentCurves, controlSimulator)"]
   AS -->|kind=external| AERO["aero :8012<br/>(propellerAero: XFOIL + BEMT)"]
   MS -->|invoke missionSimulator| AS
   MS --- PG[(PostgreSQL<br/>schemas: models, analysis)]
@@ -33,7 +33,7 @@ flowchart LR
 | `analysis` | 8003 | Registry of analyses (`builtin` Python functions, `formula`, `external` REST endpoints). `POST /analyses/{name}/invoke` runs one. Every call is logged together with the id of the run that made it. |
 | `geometry` | 8004 | Generates 3-D geometry of a system instance as binary glTF 2.0, from the component instances in its slots and their attribute values. It reads the project's catalog from the model service, so it stores nothing. |
 | `aero` | 8012 | Propeller aerodynamics, an external analysis registered as `propellerAero`. It runs XFOIL for the polars of the blade sections and a blade-element momentum model for the propeller, and returns thrust and power coefficients against advance ratio, fitted as the quadratics the dynamic simulation uses. |
-| `mission-sim` | 8011 | Mission simulator, an external analysis registered as `missionSimulator`. It flies a mission step by step and returns the battery energy drawn, its share of the pack, the mission time, the state of charge over time, and whether the reserve holds. The same service is also a second external analysis, `dynamicsSimulator` (`POST /dynamics`). It flies the mission through the propulsion chain and returns the energy and power of each behavior, the propeller and motor performance curves, and each behavior's operating point on them. |
+| `mission-sim` | 8011 | Mission simulator, an external analysis registered as `missionSimulator`. It flies a mission step by step and returns the battery energy drawn, its share of the pack, the mission time, the state of charge over time, and whether the reserve holds. The same service is also a second external analysis, `dynamicsSimulator` (`POST /dynamics`). It flies the mission through the propulsion chain and returns the energy and power of each behavior, the propeller and motor performance curves, and each behavior's operating point on them. A third, `componentCurves` (`POST /curves`), returns the performance curves of one propeller or motor from its attribute values, using the same component models. A fourth, `controlSimulator` (`POST /control`), simulates the drone's closed-loop control (a command mixer, cascaded PID loops down to each ESC, rotor dynamics, reaction torques and inertia), tunes the gains from open-loop tests and verifies the control requirements. |
 | `postgres` | 5432 | PostgreSQL 16. The model and analysis services each own a schema. |
 
 ## Quick start
@@ -43,23 +43,23 @@ docker compose up --build
 # open http://localhost:8080
 ```
 
-On first start the model service creates a demo project, **Delivery Drones**. It is a configurable parcel delivery drone. Its library ([`examples/drone_library.sysml`](examples/drone_library.sysml)) has frames from 450 to 1600 mm, six batteries, four motors, four propellers, and parcel boxes and winches carrying 1 to 15 kg. The quad, hexa and octo architectures ([`examples/drone_architectures.sysml`](examples/drone_architectures.sysml)) set the number of rotors through the multiplicity of the `motors` and `propellers` slots (`part :>> motors[6];`). Each architecture derives takeoff mass, thrust-to-weight, hover power, endurance and propeller-tip clearance from the parts chosen. Six requirement defs check every drone. Of the six configured drones, `parcel`, `regional` and `heavyLift` pass every check. `courier`, `parcelLongRange` and `regionalLiIon` each fail one or two, for different reasons. The library also declares abstract behaviors with parameters: takeoff, cruise, hover, winch, landing and drop-off. Its behavior catalog holds performance profiles, such as `cruise12` (12 m/s, power factor 1.1). Every architecture performs takeoff, cruise, hover, land and release; the Octocopter also performs winch lowering. Each drone performs a profile for each of them. The four delivery missions ([`examples/drone_missions.sysml`](examples/drone_missions.sysml)) are ordered lists of behaviors with distances and altitudes. Each drone flies a mission with its own profiles. The mission simulator verifies the energy (20 % reserve) and 30-minute time requirements. A design-time endurance estimate is checked from the mission totals. All six drones can fly `shortHop`. Only `parcelLongRange` has the battery for `rural`. Only `heavyLift` can fly `winchDrop`, because it is the only drone that performs winch lowering.
+On first start the model service creates a demo project, **Delivery Drones**. It is a configurable parcel delivery drone. Its library ([`examples/drone_library.sysml`](examples/drone_library.sysml)) has frames from 450 to 1600 mm, six batteries, four motors, four propellers, and parcel boxes and winches carrying 1 to 15 kg. The quad, hexa and octo architectures ([`examples/drone_architectures.sysml`](examples/drone_architectures.sysml)) set the number of rotors through the multiplicity of the `motors` and `propellers` slots (`part :>> motors[6];`). Each architecture derives takeoff mass, thrust-to-weight, hover power, endurance and propeller-tip clearance from the parts chosen. The requirements ([`examples/drone_requirements.sysml`](examples/drone_requirements.sysml)) are a specification: abstract requirement types with parameters, and a hierarchy of statements holding instances of them, for systems and components. Of the six configured drones, `parcel`, `regional` and `heavyLift` pass every check. `courier`, `parcelLongRange` and `regionalLiIon` each fail one or two, for different reasons. The library also declares abstract behaviors with parameters: takeoff, cruise, hover, winch, landing and drop-off. Its behavior catalog holds performance profiles, such as `cruise12` (12 m/s, power factor 1.1). Every architecture performs takeoff, cruise, hover, land and release; the Octocopter also performs winch lowering. Each drone performs a profile for each of them. The four delivery missions ([`examples/drone_missions.sysml`](examples/drone_missions.sysml)) are ordered lists of behaviors with distances and altitudes. Each drone flies a mission with its own profiles. The mission simulator verifies the energy (20 % reserve) and 30-minute time requirements. A design-time endurance estimate is checked from the mission totals. All six drones can fly `shortHop`. Only `parcelLongRange` has the battery for `rural`. Only `heavyLift` can fly `winchDrop`, because it is the only drone that performs winch lowering.
 
-Things to try in the UI. The left sidebar opens each panel; **«** collapses it to icons. Its **Editor** item shows or minimizes the text editor.
+Things to try in the UI. The left sidebar opens each panel; **«** collapses it to icons. Its **Editor** item shows or minimizes the text editor. The **☀ ◐ ☾** switch in the top bar picks a light or dark theme, or follows the system setting (the default). The browser remembers the choice.
 
 1. **Edit the text.** The model is re-interpreted about 0.5 s after you stop typing. Diagnostics appear in the gutter and the problems list, and the diagrams update. You can switch between four views: Structure, Interconnection (with ports and connections), Requirements (with satisfy relations and verdicts) and Behavior (actions and states). The editor is a modeless window floating over the workspace, so the diagram and the other panels stay usable while it is open. Drag its title bar to move it, drag the bottom-right corner to resize it, and double-click the title bar or press **–** to minimize it. **⇤** docks it beside the workspace and **⧉ Float** floats it again. The browser remembers its position and size.
 2. **Click a box, a compartment line or a port.** The editor selects that element's source. Moving the cursor in the editor selects the element in the diagram.
 3. **Requirements panel.** Capture a requirement with the form; the SysML text is inserted for you. **Check all satisfy relations** runs every `satisfy`, calling any REST analyses the satisfied attributes depend on.
 4. **Execute panel.** Run an action or a state machine to play back the execution trace in both the diagram and the editor. A run that calls REST analyses lists every call it made.
 5. **Analyses panel.** Register an external endpoint or a formula. **Insert SysML binding** generates a `calc def` with the `ToolExecution` metadata that binds to it.
-6. **Library panel.** Browse the component types, the behaviors and their catalog instances. **+ New instance** creates an instance from a form with one field per attribute, or one per parameter for a behavior. A behavior instance is incomplete until every parameter is set (see `cruiseSport`). You can also edit or delete instances and declare new components and behaviors. A component's parts typed by another component, such as a propeller's `material`, are chosen from that component's instances. When an analysis applies to the component, **Analyses** runs it for an instance and offers to write the results back (see [Component geometry and analyses](#component-geometry-and-analyses)).
-7. **Configurator panel.** Pick a system architecture. Fill each part slot with a compatible catalog instance, and choose a complete behavior instance for every behavior the architecture performs. Then create the system instance. **Evaluate & check requirements** computes every system instance's derived attributes and checks each applicable requirement def against it, in one run.
-8. **Missions panel.** Build a mission by clicking behaviors in the order they are performed, then set each step's quantities (distance, altitude…). Reorder steps with ↑ ↓ and change a step's behavior from its drop-down. **Evaluate & check missions** flies every mission with every drone and checks the mission requirements. The mission being edited then shows each drone's verdict, plus the step durations and a timeline for the drone you pick under **Flown by**. **▶ Simulate** runs the mission simulator for the mission being edited (saved or draft) with every drone. It shows a chart of battery charge over time with the reserve line, and a table of energy used (Wh and percent of the battery), mission time, charge left, and peak power against the battery's maximum. When more than one simulation applies, pick one beside the title. **DynamicSimulation** also shows:
+6. **Library panel.** Browse the component types, the behaviors and their catalog instances. **+ New instance** creates an instance from a form with one field per attribute, or one per parameter for a behavior. A behavior instance is incomplete until every parameter is set (see `cruiseSport`). You can also edit or delete instances and declare new components and behaviors. A component whose attributes are the parameters of a dynamics model shows its performance curves under **Performance curves**, computed by the `componentCurves` analysis. Propellers need `ct0`…`cp2` and are charted against advance ratio. Motors need `kv`, `resistance`, `noLoadCurrent` and `maxCurrent`, and are charted at full throttle on a battery you pick (by default one a system pairs with the motor). Pick an instance to chart it. While you edit or create an instance, the charts follow the form's values. A component's parts typed by another component, such as a propeller's `material`, are chosen from that component's instances. When an analysis applies to the component, **Analyses** runs it for an instance and offers to write the results back (see [Component geometry and analyses](#component-geometry-and-analyses)).
+7. **Configurator panel.** Pick a system architecture. Fill each part slot with a compatible catalog instance, and choose a complete behavior instance for every behavior the architecture performs. Then create the system instance. **Evaluate & check requirements** computes every system instance's derived attributes and checks each applicable requirement def against it, in one run. Under **Controllability**, **▶ Simulate controllability** flies each system's behaviors closed-loop with its flight controller and checks the control requirements. Select a system and **Tune controller** to identify its dynamics from open-loop tests and get proposed gains, then **Save & assign** them as a FlightController instance in the system's `controller` slot.
+8. **Specification panel.** The requirement hierarchy as a tree, with IDs, types and parameter values, against every system instance, or every component instance under **Components**. Dots show where each requirement applies. **▶ Check requirements** evaluates every instance where it applies and rolls the verdicts up through the statements. Select a requirement to see its text, type, constraint, parameters and what it applies to.
+9. **Missions panel.** Build a mission by clicking behaviors in the order they are performed, then set each step's quantities (distance, altitude…). Reorder steps with ↑ ↓ and change a step's behavior from its drop-down. **Evaluate & check missions** flies every mission with every drone and checks the mission requirements. The mission being edited then shows each drone's verdict, plus the step durations and a timeline for the drone you pick under **Flown by**. **▶ Simulate** runs the mission simulator for the mission being edited (saved or draft) with every drone. It shows a chart of battery charge over time with the reserve line, and a table of energy used (Wh and percent of the battery), mission time, charge left, and peak power against the battery's maximum. When more than one simulation applies, pick one beside the title. **DynamicSimulation** also shows: A saved mission's **Assigned to** chips set the drones that fly it. Its requirements, from its type's objective and its own, are listed under the preview.
    - the energy, average power and peak power of each behavior, for every drone;
    - electrical power over time;
    - for the drone you pick, small-multiple charts of the propeller's torque coefficient, thrust/power (CT/CP) and efficiency against advance ratio, and of the motor's torque, speed, shaft power and efficiency against current. Each behavior's operating point is marked on every chart, and hovering one shows its rpm, thrust, torque, current, throttle and efficiencies.
-9. **3-D panel.** Pick a system instance to see its generated geometry. Drag to orbit, scroll to zoom, and click a part to see its component instance (**Show in editor** opens its text). The exploded slider pulls the parts apart. The panel also shows the dimensions and the propeller tip clearance. Overlapping propeller discs are drawn red. The geometry is generated again after every change, so swapping a frame in the Configurator changes the drone on screen.
-10. **Req. hierarchy panel.** Pick a system instance, or select one in the diagram, to see all its requirements in one tree, grouped as System, Components (one entry per slot), Behaviors (one per performed behavior) and Missions. Each requirement shows its text with the instance's numbers filled in, the values it is checked with, and the tests that verify it. A requirement that no test verifies is marked **no test**. **▶ Check requirements** evaluates every requirement against the model and, with **fly missions**, flies each mission and runs the simulations that verify its requirements. Each verdict is rolled up to the requirement, component and group above it. Filter for **Problems** or for requirements **Without a test**, and click a requirement to see its constraints, its values (and where each is set), how it was verified and the measured values.
+10. **3-D panel.** Pick a system instance to see its generated geometry. Drag to orbit, scroll to zoom, and click a part to see its component instance (**Show in editor** opens its text). The exploded slider pulls the parts apart. The panel also shows the dimensions and the propeller tip clearance. Overlapping propeller discs are drawn red. The geometry is generated again after every change, so swapping a frame in the Configurator changes the drone on screen.
 
 ## Component library and system configuration
 
@@ -123,22 +123,27 @@ part parcel : Quadcopter {
     perform action :>> cruise :> Behaviors::cruise12;   // every behavior slot is required
 }
 
-#Mission action def DeliveryMission {           // a mission type
+#Mission use case def DeliveryMission {        // a mission type: a use case
+    subject drone : DeliveryDrone;              // the system that flies it
     attribute duration : Real;                  // totals: summed over the steps
     attribute hoverTime : Real;
-}
-requirement def MissionEnduranceEstimate {      // a mission requirement checked from the totals
-    subject drone : DeliveryDrone;
-    in hoverTime : Real;                        // named like a total
-    require constraint { hoverTime <= drone.endurance * 60 }
+    objective deliveryGoals {                   // what every delivery requires of its drone
+        requirement <'MIS-2'> time : MissionTime { attribute :>> limit = 1800; }
+    }
 }
 package Missions {
-    action shortHop : DeliveryMission {         // a mission: ordered steps,
-        first start;                            // each an abstract behavior with its quantities set
-        then action takeoff : Takeoff { attribute :>> altitude = 30; }
-        then action cruise : Cruise { attribute :>> distance = 2000; }
+    use case rural : DeliveryMission {          // a mission: ordered steps,
+        objective :>> deliveryGoals {           // and requirements of its own
+            requirement <'MIS-R1'> farmWindow : MissionTime { attribute :>> limit = 1500; }
+        }
+        first start;                            // each step an abstract behavior with its quantities set
+        then action takeoff : Takeoff { attribute :>> altitude = 60; }
+        then action cruise : Cruise { attribute :>> distance = 8000; }
         then done;
     }
+}
+package Assignments {                           // which drone flies which mission
+    allocate Missions::rural to DroneArchitectures::Configurations::parcelLongRange;
 }
 ```
 
@@ -147,14 +152,17 @@ package Missions {
 - In SysML v2, a specialized behavior's own parameters redefine the inherited ones *by position*. A behavior that adds parameters therefore restates the inherited ones first (`in :>> powerFactor;`). **+ New behavior** writes those lines for you.
 - To fly a step, a system instance uses the behavior it performs for the step's behavior type. That is the slot whose type is the step's behavior or a behavior it specializes. The flown step is an action that subsets both the performed behavior and the step, `action f1 :> Configurations::parcel.cruise, Missions::shortHop.cruise;`. It takes its parameters from the performed behavior and its quantities from the step, so its derived attributes evaluate with both. If the system performs no behavior of a step's type, it cannot fly the mission.
 - A mission's totals are the sums of the same-named attributes over the flown steps, so they depend on the system flying it. Missions on their own cannot run in the Execute panel, because their steps have no parameters until a system flies them.
-- A mission requirement is a requirement def with `in` parameters. It applies to every system instance whose architecture conforms to its subject type, and is checked as `Requirement(system, value, …)`. Where the values come from depends on how it is verified (below). The Configurator leaves mission requirements out of its own checks.
+- **Missions are use cases.** The mission type is a `use case def` with the drone as its subject, and each mission is a use case of it.
+- **Mission requirements live in objectives.** They're instances of requirement types (`DroneRequirements::Types`: `MissionEnergy`, `MissionTime`, …). The ones in the mission type's objective apply to every mission of the type. A mission adds its own by redefining the objective, as `rural` does with its farm window. Their parameters (limits, reserves) are attributes set by the instance. Their `in` parameters are the measured values, from a mission simulation or the mission totals.
+- **Assignments are allocations** (`allocate <mission> to <system instance>`, in an `Assignments` package). They say which drone flies which mission, and a mission's requirements apply only to the drones it is assigned to. Edit them in the Missions panel with **Assigned to**, or with `POST /projects/{id}/catalog/missions/assignments`. **Evaluate & check missions** still flies every mission with every drone, to compare candidates, and marks the assigned pairs with ★. The Specification panel and the requirements check use only the assigned pairs. A drone that can't fly a mission it's assigned fails that mission's requirements.
+- **Each requirement is checked as `Instance(system, measured…)`**, for example `DeliveryMission::deliveryGoals::energy(parcel, 75.2)`.
 - A **mission simulation** is a def bound to an external analysis by `ToolExecution` metadata, with a system as its subject. Its `in` parameters with a value say what the analysis receives from the system. Its `out` parameters name the results the requirements are checked with. As a `verification def`, its objective names the requirements it verifies:
 
   ```sysml
-  requirement def MissionEnergyRequirement {
+  abstract requirement def MissionEnergy {                    // DroneRequirements::Types
       subject drone : DeliveryDrone;
+      attribute reserve : Real;                                 // a parameter, set by the instance
       in energyPercent : Real;                                  // a simulation result
-      attribute reserve : Real = 0.2;
       require constraint { energyPercent <= 100 * (1 - reserve) }
   }
   verification def MissionSimulation {
@@ -168,20 +176,20 @@ package Missions {
       out energyPercent : Real;                                 // results, by name
       out missionTime : Real;
       objective {
-          verify requirement energy : MissionEnergyRequirement;
-          verify requirement time : MissionTimeRequirement;
+          verify requirement energy : MissionEnergy;            // every instance of the type
+          verify requirement time : MissionTime;
       }
   }
   ```
 
 - **How a mission requirement is verified, for each system instance:**
-  - **By simulation**, when a mission simulation applies to the system's architecture, verifies the requirement, and has an `out` parameter for each of the requirement's parameters. The requirement is checked with the simulator's results, for example `MissionEnergyRequirement(parcel, 75.2)`. If the simulated flight does not complete (the battery empties), every requirement it verifies fails.
-  - **By evaluation**, otherwise, when each parameter is named like a total of the mission type. The requirement is checked with the totals summed over the flown steps.
+  - **By simulation**, when a mission simulation applies to the system's architecture, verifies the requirement's type, and has an `out` parameter for each of its measured values. The instance is checked with the simulator's results and its own parameters. If the simulated flight does not complete (the battery empties), every requirement it verifies fails.
+  - **By evaluation**, otherwise, when each measured value is named like a total of the mission type. The requirement is checked with the totals summed over the flown steps.
   - **Not at all**, if neither applies.
 
   **Evaluate & check missions** reports the verdict and the method for each requirement and drone. The **Verifies** column of the simulation table shows the requirements the simulation verified.
 
-  `POST /projects/{id}/catalog/missions/simulate` flies the mission with every system instance the simulation applies to. It evaluates those parameters with the system as subject, and evaluates every attribute and parameter of each flown step (`duration`, `powerFactor`, `releasesPayload`…). It then calls the analysis through the analysis service, which logs each call under the returned run id. The simulator integrates power over time. Power follows the mass, so the drone is lighter after a step that `releasesPayload`, and the battery delivers it with a loss that grows with load. As a result, it can differ from the totals-based `MissionEnduranceEstimate`, which assumes full mass throughout. On `suburban`, `parcel`, `regional` and `heavyLift` fail the estimate but meet the simulated `MissionEnergyRequirement`, because the return leg is flown without the parcel.
+  `POST /projects/{id}/catalog/missions/simulate` flies the mission with every system instance the simulation applies to. It evaluates those parameters with the system as subject, and evaluates every attribute and parameter of each flown step (`duration`, `powerFactor`, `releasesPayload`…). It then calls the analysis through the analysis service, which logs each call under the returned run id. The simulator integrates power over time. Power follows the mass, so the drone is lighter after a step that `releasesPayload`, and the battery delivers it with a loss that grows with load. As a result, it can differ from the totals-based endurance estimate (MIS-3), which assumes full mass throughout. On `suburban`, `parcel` and `regional` fail the estimate but meet the simulated energy requirement (MIS-1), because the return leg is flown without the parcel.
 - **Several simulations.** A project can have more than one simulation def. Evaluation runs every simulation that verifies one of a drone's requirements and reports each under `simulations[def]`. The simulate endpoint runs the one named in `simulation`, or by default the first that applies.
 - **The dynamic simulation** ([`services/mission-sim/app/dynamics.py`](services/mission-sim/app/dynamics.py), `DroneMissions::DynamicSimulation`) assumes still air and a constant air density. It flies each step with a 0.2 s time step:
   - **Vehicle.** A point mass follows the step's `groundSpeed` and `verticalSpeed`, accelerating at no more than 2 m/s². The rotors carry its weight, its drag `½ ρ CdA v²` and the inertia of each acceleration, and the drone tilts to point the thrust that way.
@@ -192,43 +200,6 @@ package Missions {
 
   The propeller, motor and frame catalogs carry these parameters, and the behaviors set the speeds (for example `Cruise` sets `groundSpeed = speed`). The simulation verifies `MissionPeakPowerRequirement` (peak electrical power, transients included, within the battery's maximum) and `ThrottleHeadroomRequirement` (at most 80 % throttle). `regionalLiIon` fails the throttle requirement at 82 %, because its 21.6 V pack sags under load. Descent is treated as hover inflow (no vortex ring state), and edgewise rotor effects are not modelled.
 - **Evaluate & check missions** calls `POST /projects/{id}/catalog/missions/evaluate`. The service writes the flown steps of every mission and drone into a scratch package. One evaluate run gives the step totals, the totals-based verdicts and the simulation inputs. The simulations then run through the analysis service, and a second evaluate run checks the requirements they verify. Nothing is stored except the analysis service's call log.
-
-### Requirement library, hierarchy and tests
-
-Requirements can be written once, in a library, and reused by components, architectures, behaviors and mission types. Each instance then states its own numbers:
-
-```sysml
-abstract requirement def MinimumValue {                 // a library requirement
-    doc /* The value shall be at least {minimum}. */      // {minimum}: shown with each instance's number
-    attribute actual : Real;
-    attribute minimum : Real;                           // attributes without a value: set by a usage or an instance
-    require constraint { actual >= minimum }
-}
-#Component part def Battery {
-    attribute energy : Real;
-    attribute mass : MassValue;
-    requirement specificEnergy : MinimumValue {         // a requirement usage: binds what it constrains
-        attribute :>> actual = energy / (mass / (1 [SI::kg]));
-    }
-}
-part lipo4s5000 : Battery {
-    attribute :>> energy = 74;
-    attribute :>> mass = 0.55 [SI::kg];
-    requirement :>> specificEnergy { attribute :>> minimum = 130; }   // the instance states the number
-}
-verification def BatteryAcceptanceTest {                // a test
-    subject battery : Battery;
-    objective { verify battery.specificEnergy; }        // verifies a usage (or, `verify requirement : Def;`, a def)
-}
-```
-
-- A requirement def is a **template** when it is abstract or leaves an attribute without a value. Templates are never applied by subject type. They are used only through requirement usages.
-- A **requirement usage** can appear in a `#Component` or `#SystemArchitecture` part def, a `#Behavior` action def or a `#Mission` action def. It may bind some of the template's attributes, usually what it constrains (`actual`). It may also nest further requirements, as `DeliveryPerformance` does with `payload` and `massClass`.
-- **Instances must state the actual numbers.** A component or behavior instance, a system instance or a mission redefines each usage and sets the values the usage leaves open, for example `requirement :>> delivery { requirement :>> payload { attribute :>> minimum = 10; } }`. Each value is a number, optionally with a unit. The Library, Configurator and Missions forms ask for these values and show them in the text preview. The service refuses to save an instance that leaves a value unset, uses an expression, or names a value that does not exist. When a rewrite omits `requirements`, the instance keeps the values it has.
-- A **test** is a `verification def`. Its objective names what it verifies: a requirement usage, through its subject (`verify drone.delivery;`), or a requirement def (`verify requirement : EnduranceRequirement;`). A test verifies every usage of that def and of its specializations whose owner conforms to the test's subject type. A nested requirement is also verified by the tests of its parent. A test bound to an external analysis by `ToolExecution` metadata is a **simulation**: it verifies mission requirements with its results, as described above. Any other test is checked by **analysis**: the requirement is evaluated against the model.
-- **How a usage is checked.** The service writes a scratch requirement def that specializes the usage's def and binds each value the usage or the instance sets, reached through the instance: `requirement def r1 :> MinimumValue { attribute :>> minimum = Catalog::lipo4s5000.specificEnergy.minimum; … }`. It then calls that def with the subject. System requirements use the system instance as subject, component requirements the component instance, and behavior requirements the performed behavior (`parcel.cruise`). A mission's usages are checked like the other mission requirements, for every system that flies it, under the key `MissionType.usage`.
-- **Requirement ids** are SysML short names: `requirement def <'SYS-01'> ThrustToWeightRequirement`, `requirement <'BAT-01'> specificEnergy : MinimumValue`. A usage without an id of its own shows its def's id. A nested requirement without one is numbered from its parent: `SYS-07.1`, `SYS-07.2`. A redefinition of a usage that has an id must restate it, `requirement <'BAT-01'> specificEnergy :>> specificEnergy { … }`, because OpenSysML finds such a feature only by its id. The forms write it that way. The ids appear in the hierarchy panel (where **Find** searches them), the Library, the forms, the Configurator and Missions tables and the Requirements panel. The demo numbers system requirements `SYS-`, mission requirements `MSN-`, library requirements `LIB-`, and component and behavior requirements `BAT-` and `CRZ-`.
-- In the demo, the library declares `MinimumValue` and `MaximumValue`. Batteries state the specific energy their datasheet guarantees, and `lipo12s22000` fails it because of the series harness. Cruise profiles state the speed they are cleared for. Each drone states its rated payload and its mass class through the composite `DeliveryPerformance`; `heavyLift`, at 27.7 kg, exceeds its 25 kg class. Each mission states its delivery window (`MissionTimeLimit`, verified by the mission simulation), and the slower drones miss the 18-minute suburban window. `WeighAndLoadTest`, `HoverEnduranceTest`, `BatteryAcceptanceTest` and `CruiseClearanceReview` are the tests. The propeller and battery-power requirements have no test, so they show up under **Without a test**.
 
 ## Component geometry and analyses
 
@@ -252,7 +223,7 @@ analysis def PropellerAerodynamics {
 }
 ```
 
-`POST /projects/{id}/catalog/components/analyze` `{"instance"}` runs it through the analysis service, which logs the call under the returned run id. The response also holds the instance's current values of every output that is named like an attribute of its component. The Library's **Analyses** section compares the two and **Write … to *instance*** saves the results as a new version of the instance. Every analysis that uses those values then runs with them.
+`POST /projects/{id}/catalog/components/analyze` `{"instance"}` runs it through the analysis service, which logs the call under the returned run id. The response also holds the instance's current values of every output that is named like an attribute of its component. The Library's **Analyses** section compares the two and **Write … to *instance*** saves the results as a new version of the instance. Every analysis that uses those values then runs with them, and **Performance curves** charts the new curves.
 
 **Propeller aerodynamics** ([`services/aero`](services/aero)):
 
@@ -333,11 +304,16 @@ Interactive OpenAPI docs are served at `/docs` on each service, e.g. http://loca
 - `POST /projects/{id}/catalog/configurations` `{"architecture", "name", "assignments": {slot: instance}, "behaviors": {behavior slot: behavior instance}, "doc"?, "package"?, "replace"?}`
 - `POST /projects/{id}/catalog/components` `{"name", "package", "kind"?: "part" | "action", "specializes"?, "abstract"?, "attributes": [{name, type}], "ports": [...], "params"?: [...]}`
 - `POST /projects/{id}/catalog/missions` `{"missionType", "name", "steps": [{"behavior", "values": {quantity: expr}}], "doc"?, "package"?, "replace"?}`
-- `POST /projects/{id}/catalog/missions/simulate` `{"missionType", "simulation"?: simulation def, "mission"? | "draft"?: [steps], "systems"?: [system instance]}`: the mission simulated for each system instance (simulation inputs, the analysis' outputs, or why it cannot be flown) and the run id the analysis service logged the calls under
+- `POST /projects/{id}/catalog/missions/simulate` `{"missionType", "simulation"?: simulation def, "mission"? | "draft"?: [steps], "systems"?: [system instance]}`: the mission simulated for each system instance (simulation inputs, the analysis' outputs, or why it cannot be flown) and the run id the analysis service logged the calls under. Each simulation also gives its stored `resultId`, the `commitId` simulated, and `reused` when the outputs came from a stored result with the same inputs.
+- `POST /projects/{id}/requirements/check`: every requirement instance of the specification, checked for each system or component instance it applies to (`verdicts`), statements rolled up (`rollup`), and mission requirements for the drones their missions are assigned to (`missionVerdicts`, per mission in `missionDetail`)
+- `POST /projects/{id}/catalog/configurations/simulate` `{"architecture"? | "systems"?: [system instance], "simulation"?}`: run the system simulations (`#SystemSimulation` verification defs) of system instances and check the requirements they verify
+- `POST /projects/{id}/catalog/configurations/tune` `{"system", "simulation"?}`: run a tuning analysis; its outputs come back as `proposals` for the component in the system's matching slot (`slot`, `component`, `current`)
+- `GET /projects/{id}/results?mission=&system=&limit=`: stored simulation results, newest first, without inputs, timelines or curves
+- `GET /results/{id}`: one stored result: everything sent to the simulator, everything it returned, and the verdicts
+- `GET /projects/{id}/evidence`: simulation evidence recorded in the project's models, each with its stored result and whether it is still `current`
+- `POST /results/{id}/evidence` `{"tag"?: bool}`: record a stored result as verification evidence in the `VerificationEvidence` model, replacing the evidence of the same mission, system and simulation; with `tag`, also tag the simulated commit `verified/<mission>/<system>/<result>`
+- `POST /projects/{id}/catalog/missions/assignments` `{"mission", "systems": [system instance]}`: the drones a mission is assigned to (allocations in the `Assignments` package)
 - `POST /projects/{id}/catalog/missions/evaluate` `{"missionType", "draft"?: [steps]}`: every mission (and the draft) flown by every system instance that performs behaviors: per-step values, totals, mission requirement verdicts with how each was verified (simulation or evaluation) and the values used, or why it cannot be flown
-- `GET /projects/{id}/catalog/requirement-tree?system=`: the requirement hierarchy of a system instance (system, components, behaviors, missions), with each requirement's def, text, values, nested requirements and verifying tests
-- `POST /projects/{id}/catalog/requirement-tree/check` `{"system", "missions"?: true}`: the same tree with a `verdict` (holds, fails, error, missing, cannot fly) and `verifiedBy` on every requirement, and a `rollup` on every node
-- Creating or rewriting an instance, system instance or mission takes `"requirements": {"usage.attribute": "number"}` (nested usages: `"delivery.payload.minimum"`). Mission evaluation and simulation take the draft's values as `draftRequirements`.
 - `POST /projects/{id}/catalog/components/analyze` `{"instance", "analysis"?}`: run a component analysis for a catalog instance: its inputs, outputs, and the instance's current values of the outputs that are attributes. Instances also take `"parts": {"material": "Lib::Catalog::cfrpWoven"}`.
 - `DELETE /projects/{id}/catalog/elements?qualifiedName=`
 
@@ -360,6 +336,144 @@ Interactive OpenAPI docs are served at `/docs` on each service, e.g. http://loca
 - `GET/POST /analyses`, `GET/PUT/PATCH(?enabled=)/DELETE /analyses/{name}`
 - `POST /analyses/{name}/invoke` `{"inputs": {...}, "uri"?, "runId"?}`
 - `GET /invocations?runId=&analysis=&limit=`
+
+## Requirements: types, instances and the specification
+
+Requirements are organised in three kinds, all plain SysML v2 (`DroneRequirements`):
+
+- **Requirement types** are abstract, parameterised requirement defs on an abstract system or component type, their subject. Attributes are **parameters**: the targets and limits an instance sets. `in` parameters are **measured values** that a verification supplies, such as a simulation result or a mission total.
+- **Requirement instances** are requirement usages typed by a requirement type, with their parameters set, an ID and their own text.
+- **Statements** are requirement usages with only an ID and a doc. They hold more specific statements or instances, which makes the hierarchy.
+
+```sysml
+abstract requirement def ThrustToWeight {
+    subject drone : DeliveryDrone;
+    attribute minRatio : Real;                      // a parameter
+    require constraint { drone.thrustToWeight >= minRatio }
+}
+abstract requirement def MotorEfficiency {           // on an abstract component
+    subject motor : Motor;
+    attribute minimum : Real;
+    require constraint { motor.efficiency >= minimum }
+}
+package Specification {
+    requirement <'STK-1'> deliverParcels {
+        doc /* The drone shall deliver parcels of up to 10 kg safely and reliably. */
+        requirement <'SYS-1'> flightPerformance {
+            doc /* The drone shall have the lift and endurance a delivery flight needs. */
+            requirement <'SYS-1.1'> liftMargin : Types::ThrustToWeight { attribute :>> minRatio = 2.0; }
+            requirement <'SYS-1.3'> heavyLiftMargin : Types::ThrustToWeight { attribute :>> minRatio = 2.5; }
+        }
+        requirement <'CMP-1'> componentQuality {
+            doc /* Components shall meet the procurement specification. */
+            requirement <'CMP-1.1'> motorEfficiency : Types::MotorEfficiency { attribute :>> minimum = 0.82; }
+        }
+    }
+    satisfy deliverParcels.flightPerformance.heavyLiftMargin by DroneArchitectures::Configurations::heavyLift;
+}
+```
+
+- **Applicability.** An instance applies to the system or component instances its `satisfy` relations name. With none, it applies to every system instance (or component instance) its subject type fits, except those that satisfy another instance of the same type.
+- **Per-system limits.** An instance that a system satisfies replaces, for that system, the general instances of the same type. Above, `liftMargin` applies to every drone except heavyLift, `heavyLiftMargin` (the same type with a stricter limit) only to heavyLift, and `motorEfficiency` to every motor in the catalog. The Specification panel marks a replaced cell ↷.
+- **Checking.** `POST /projects/{id}/requirements/check` evaluates each instance as `Instance(subject)` wherever it applies, in one run. Instances whose types take measured values are checked as `Instance(system, measured…)` with the results of the system simulations that verify their types (the control requirements; stored results are reused), with the values in `systemDetail`. Those no simulation verifies stay unverified (◇). A statement holds for a subject when every instance under it that applies does. With `?scope=static`, nothing is simulated: instances that take measured values stay unverified and missions are skipped. That takes about 2 s and is what the Library and the Configurator use.
+- **Where verdicts show.**
+  - The Specification panel shows the hierarchy against systems or components, with the simulated values of each control requirement in its detail.
+  - The Configurator's comparison shows the system-level instances that apply to the architecture, with "n/a" where one doesn't apply to a system.
+  - The Library lists the component requirements that apply to a component's instances, and gives each instance a ✓ or the IDs of the requirements it fails. A red dot in the component tree marks a type with a failing instance.
+  - In the Configurator's slot lists, failing candidates are greyed, marked ✗ with the requirements they fail, and listed last. They stay selectable, so you can still try them, and a failing choice is flagged under its slot.
+- **Requirement IDs** are SysML short names (`<'SYS-1.1'>`).
+- **In the demo**, courier and parcelLongRange fail the lift margin, courier also fails hover endurance, regionalLiIon fails battery power, and heavyLift fails its stricter heavy-lift margin. Among components, the m2814 motor (80 %) fails motor efficiency and the Li-ion pack (4.5 C) fails battery discharge.
+- **Mission requirements** are instances in the objectives of mission types and missions. They apply to the drones a mission is assigned to, and the Specification panel shows them in a Missions section.
+- **Control requirements** are instances under `SYS-4 controllability`, of the types `ControlStability`, `ControlAuthority` and the `#ControlTest` types (next section). `SYS-4.8 heavyLiftTurn` gives heavyLift a 180° turn with looser limits in place of `SYS-4.6 turnResponse`.
+
+## Controllability: mixer, control loops and tuning
+
+The `controlSimulator` analysis (`services/mission-sim/app/control.py`) flies a drone the way a flight controller does. It's a 6-DOF rigid body with one rotor per motor. The command mixer turns thrust and body torques into rotor speeds, and a cascade of loops runs down to each motor's ESC:
+
+```
+speed, heading ─► velocity loop (PI) ─► tilt and thrust   climb rate ─► vertical loop (PI)
+position (hover hold) ─► position loop (P) ─► speed
+tilt, heading ─► attitude loop (P), heading loop (P) ─► body-rate commands
+body rates ─► rate loops (PID roll and pitch, PI yaw) ─► torques
+thrust + torques ─► MIXER ─► thrust per rotor ─► speed command
+rotor speed ─► ESC speed loop (PI, per motor), or throttle only ─► motor voltage
+```
+
+- **Mixer.** The rotors sit in the X layout of the geometry service and spin in alternate directions (`firstRotorSpin`). The allocation matrix maps rotor thrusts to collective thrust and roll, pitch and yaw torque; the mixer is its pseudo-inverse. When a rotor would leave its range, yaw gives way first, then collective thrust, then roll and pitch.
+- **Physics.** The rotors use the propeller's static coefficients and the motor model of the dynamic simulation, with the ESC's current and voltage limits. The body feels each motor's torque, so the yaw reaction includes the rotors spinning up, plus the rotors' gyroscopic torque. Inertia comes from derived attributes of `DeliveryDrone` (`inertiaXX`, `inertiaZZ`, `rotorInertia`), closed-form sums over the components' masses and positions.
+- **Tuning** (`ControllerTuning`, an analysis def), inside out with open-loop tests:
+  1. A voltage step on one motor with the body held gives the rotor time constant. The ESC speed loop is a PI from it.
+  2. Torque steps on a gimbal, with the speed loops closed, give `1/inertia` and the lag of each axis. Every body torque follows the rotor loop, so the lag is at least the rotor loop's time constant. Roll and pitch get a PID and yaw a PI (SIMC rules for integrating processes), lowered until the loop has 45° of phase margin.
+  3. The attitude, heading, velocity and position loops each get a quarter of the bandwidth of the loop inside them. The vertical loop is gentler, to keep thrust headroom.
+
+  The out parameters of `ControllerTuning` are named like the attributes of `FlightController`. **Save & assign** writes them to a FlightController instance and puts it in the system's `controller` slot. The gains are design data, so they live in the model; the time responses live in the results store.
+- **Control tests are requirements.** Each manoeuvre is an abstract requirement type tagged `#ControlTest`, in `DroneRequirements::Types`. The attributes it gives a value say what to fly, and an instance may override them. The attributes it leaves open are the limits each instance sets. Its `in` parameters say which of the test's results it is checked with:
+
+  ```sysml
+  abstract #ControlTest requirement def SpeedStepTest {
+      subject drone : DeliveryDrone;
+      attribute command : String = "speed";                // climbRate, speed, heading or gust
+      attribute step : Real default = drone.cruise.speed;  // m/s, from the behavior the drone performs
+      attribute hold : Real default = 9;                   // s
+      attribute settlingLimit : Real;                      // limits: set by each instance
+      attribute overshootLimit : Real;
+      attribute tiltLimit : Real;
+      attribute saturationLimit : Real;
+      in settlingTime : Real;
+      in overshoot : Real;
+      in maxTilt : Real;
+      in saturation : Real;
+      require constraint { settlingTime <= settlingLimit and overshoot <= overshootLimit and maxTilt <= tiltLimit and saturation <= saturationLimit }
+  }
+  // in the specification
+  requirement <'SYS-4.5'> speedResponse : Types::SpeedStepTest {
+      attribute :>> settlingLimit = 5;
+      attribute :>> overshootLimit = 15;
+      attribute :>> tiltLimit = 35;
+      attribute :>> saturationLimit = 5;
+  }
+  ```
+
+  Use `default =` for what an instance may override: a plain `=` binds the value for good.
+
+  Every test starts from a settled hover:
+  - `climbRate` steps the vertical speed (a negative step is a descent).
+  - `speed` steps the ground speed.
+  - `heading` turns by `step` degrees at `rate` deg/s, and settling counts from the end of the turn.
+  - `gust` steps the wind while holding position.
+
+  The results a test can be checked with are `riseTime`, `settlingTime`, `overshoot`, `maxTrackingError`, `maxDeviation`, `finalError`, `maxTilt` and `saturation`. The demo has five test types: `ClimbStepTest`, `DescentStepTest`, `SpeedStepTest`, `TurnTest` (90° at the drone's turn rate by default) and `GustTest` (5 m/s). Their instances are `SYS-4.3` to `SYS-4.8`. Each takes its command from the drone's own behaviors, so heavyLift is tested at 2 m/s climb, 10 m/s cruise and 30°/s turns. Its own turn test, `SYS-4.8`, turns 180°.
+- **Verification** (`ControlSimulation`, a verification def) uses the gains of the system's controller. Its objective lists the types it verifies: `ControlStability` (phase and gain margins), `ControlAuthority` (thrust margin, yaw authority, saturation) and every control test type. For each system, the model service sends the simulator the test instances that apply to it, with what each one flies evaluated for that system. Limits are not sent, so changing a limit reuses the stored result. The simulator flies exactly those and returns each one's results under `testResults[instance]`. Every instance that applies, of a verified type, is then checked as `Instance(system, results…)`. To add a test, add an instance (or a new type, verified in the objective). To give one system its own limits, add an instance it satisfies. A test that cannot be flown (an unknown command, a command with no value) fails on its own, and a test that diverges fails. In the demo, `regionalLiIon` fails control authority: its heavy pack leaves a thrust margin of 1.71 against the 1.8 required.
+- **System simulations.** Both defs are tagged `#SystemSimulation`. They simulate a system on its own, from the Configurator, with the performed behaviors' parameters sent as `behaviors`, instead of flying missions. A requirement type that a system simulation verifies is a system requirement, not a mission requirement. The Controllability table has a column for each instance, with ↷ where a system has its own instance instead. Results go into the results store (mission `system`) and can be recorded as evidence.
+- **Not modelled:** sensors and state estimation (the controller sees the true state), blade flapping, ground effect, vortex ring state and battery sag. Propellers use their static coefficients. The tuned gains are a sound starting point for flight tests, not flight-ready values.
+
+## Simulation results and verification evidence
+
+Simulation results are stored **outside** the SysML v2 repository, and the model holds only a reference to the ones that matter.
+
+- **Why outside:** a result is derived from a commit. Writing it into the model would make a new commit, so the result would describe the version before the one that holds it. Re-running simulations would also fill the design history with machine commits, and timelines are poor element data. The Systems Modeling API has no results service, so storing them outside matches the standard.
+- **Results store.** `models.simulation_result` has one row per mission flown by one system instance in one simulation. A row holds the project commit simulated (head of `main`), the mission (or the steps of a draft), the system instance, the simulation def, the simulator and its registry version, everything sent to the simulator with its hash, and everything returned. It also holds the verdicts and how each requirement was verified. Evaluate and Simulate write it.
+- **Reuse.** The same simulator, version and inputs give the same outputs, so a stored result is reused instead of calling the simulator. At the same commit, the existing row is returned. At another commit, a new row copies the outputs and points at the original (`reused_from`), and gets that commit's verdicts.
+- **Evidence in the model.** **Record** (in the Missions panel's requirement verification table) writes a verification usage of the simulation into the `VerificationEvidence` model, which is created on first use. Its subject is bound to the system instance, and its `SimulationEvidence` metadata points at the stored result:
+
+  ```sysml
+  verification parcel_suburban_MissionSimulation : DroneMissions::MissionSimulation {
+      doc /* suburban flown by parcel: holds, 75.2 % of the battery, 16.6 min */
+      subject drone = DroneArchitectures::Configurations::parcel;
+      metadata SimulationEvidence {
+          resultId = "ab5aabda-…";
+          uri = "/api/models/results/ab5aabda-…";
+          commitId = "49d1364c-…";          // the model version simulated
+          mission = "DroneMissions::Missions::suburban";
+          verdict = "holds";
+          verdicts = "time holds; energy holds";
+          recordedAt = "2026-11-08T00:34:53+00:00";
+      }
+  }
+  ```
+
+  Any SysML v2 client sees which result verified what, at which version, and can follow the `uri`. Recording again for the same mission, system and simulation replaces the element; earlier evidence stays in the model's history and in the results store. **tag the simulated version** also tags that commit `verified/<mission>/<system>/<result>`. A draft cannot be recorded, because it is not in the model.
+- **Current or outdated.** Evidence is *current* while the newest stored result for its mission, system and simulation has the same simulator inputs, simulator version and verdicts. It is *outdated* once a change to the model (a behavior's speed, a battery, a requirement) changes what the simulation computes or concludes. Checking against the head commit would not work, because recording the evidence is itself a commit. The Missions panel shows the status beside each recorded result. **Stored results** lists the mission's results with links to their data.
 
 ## Storage: a SysML v2 API repository
 
@@ -417,7 +531,7 @@ export DATABASE_URL=postgresql://sysml:sysml@localhost:5432/sysml
 (cd frontend && npm install && npm run dev)   # http://localhost:5173 (Vite proxies /api/*)
 ```
 
-The seeded `missionSimulator` points at `http://mission-sim:8011/simulate` and `dynamicsSimulator` at `http://mission-sim:8011/dynamics`. Outside Docker, run that service and change the URL in the Analyses panel.
+The seeded `missionSimulator` points at `http://mission-sim:8011/simulate` `dynamicsSimulator` at `http://mission-sim:8011/dynamics` and `componentCurves` at `http://mission-sim:8011/curves`. Outside Docker, run that service and change the URL in the Analyses panel.
 
 ## Tests
 

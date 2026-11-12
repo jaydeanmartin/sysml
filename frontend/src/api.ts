@@ -6,7 +6,12 @@ import type {
   ComponentRequest,
   ConfigurationRequest,
   InstanceRequest,
+  EvidenceRecord,
   MissionEvaluation,
+  RequirementCheck,
+  SystemSimulationResult,
+  TuneResult,
+  StoredResult,
   MissionRequest,
   SimulationRequest,
   SimulationResult,
@@ -18,7 +23,6 @@ import type {
   Preview,
   Project,
   Requirement,
-  RequirementTree,
   Run,
   RunRequest,
   Version,
@@ -86,16 +90,28 @@ export const api = {
     call<CatalogChange>(`${M}/projects/${projectId}/catalog/configurations`, { method: "POST", json: req }),
   saveMission: (projectId: string, req: MissionRequest) =>
     call<CatalogChange>(`${M}/projects/${projectId}/catalog/missions`, { method: "POST", json: req }),
+  results: (projectId: string, mission?: string, system?: string, limit = 50) =>
+    call<StoredResult[]>(
+      `${M}/projects/${projectId}/results?limit=${limit}${mission ? `&mission=${encodeURIComponent(mission)}` : ""}${system ? `&system=${encodeURIComponent(system)}` : ""}`
+    ),
+  resultUrl: (resultId: string) => `${M}/results/${resultId}`,
+  evidence: (projectId: string) => call<EvidenceRecord[]>(`${M}/projects/${projectId}/evidence`),
+  recordEvidence: (resultId: string, tag: boolean) =>
+    call<CatalogChange & { tag: string | null }>(`${M}/results/${resultId}/evidence`, { method: "POST", json: { tag } }),
+  checkRequirements: (projectId: string, scope: "all" | "static" = "all") =>
+    call<RequirementCheck>(`${M}/projects/${projectId}/requirements/check?scope=${scope}`, { method: "POST" }),
+  simulateSystems: (projectId: string, req: { architecture?: string; systems?: string[]; simulation?: string }) =>
+    call<SystemSimulationResult>(`${M}/projects/${projectId}/catalog/configurations/simulate`, { method: "POST", json: req }),
+  tuneSystem: (projectId: string, system: string, simulation?: string) =>
+    call<TuneResult>(`${M}/projects/${projectId}/catalog/configurations/tune`, { method: "POST", json: { system, simulation } }),
   simulateMission: (projectId: string, req: SimulationRequest) =>
     call<SimulationResult>(`${M}/projects/${projectId}/catalog/missions/simulate`, { method: "POST", json: req }),
-  evaluateMissions: (projectId: string, missionType: string, draft: StepRequest[] | null, draftRequirements?: Record<string, string> | null) =>
-    call<MissionEvaluation>(`${M}/projects/${projectId}/catalog/missions/evaluate`, { method: "POST", json: { missionType, draft, draftRequirements } }),
+  assignMission: (projectId: string, mission: string, systems: string[]) =>
+    call<CatalogChange>(`${M}/projects/${projectId}/catalog/missions/assignments`, { method: "POST", json: { mission, systems } }),
+  evaluateMissions: (projectId: string, missionType: string, draft: StepRequest[] | null) =>
+    call<MissionEvaluation>(`${M}/projects/${projectId}/catalog/missions/evaluate`, { method: "POST", json: { missionType, draft } }),
   analyzeComponent: (projectId: string, instance: string, analysis?: string | null) =>
     call<ComponentAnalysisResult>(`${M}/projects/${projectId}/catalog/components/analyze`, { method: "POST", json: { instance, analysis } }),
-  requirementTree: (projectId: string, system: string) =>
-    call<RequirementTree>(`${M}/projects/${projectId}/catalog/requirement-tree?system=${encodeURIComponent(system)}`),
-  checkRequirementTree: (projectId: string, system: string, missions = true) =>
-    call<RequirementTree>(`${M}/projects/${projectId}/catalog/requirement-tree/check`, { method: "POST", json: { system, missions } }),
   deleteCatalogElement: (projectId: string, qualifiedName: string) =>
     call<CatalogChange>(`${M}/projects/${projectId}/catalog/elements?qualifiedName=${encodeURIComponent(qualifiedName)}`, {
       method: "DELETE",

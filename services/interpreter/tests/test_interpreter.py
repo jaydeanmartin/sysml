@@ -200,28 +200,19 @@ def test_verification_objective_verifies_requirement_defs():
     assert [(e["source"], e["target"]) for e in r["graph"]["edges"] if e["kind"] == "verify"] == [("V__Sim", "V__EnergyReq")]
 
 
-def test_verification_objective_verifies_requirement_usage_through_subject():
-    src = """package V {
+def test_requirement_ids_and_satisfy_of_a_nested_requirement():
+    src = """package S {
         private import ScalarValues::*;
-        abstract requirement def Min { attribute actual : Real; attribute minimum : Real; require constraint { actual >= minimum } }
-        part def Battery { attribute energy : Real; requirement cap : Min { attribute :>> actual = energy; } }
-        verification def Bench {
-            subject battery : Battery;
-            objective { verify battery.cap; }
+        part def M { attribute eff : Real; }
+        part m1 : M { attribute :>> eff = 0.9; }
+        requirement def Eff { subject m : M; attribute minimum : Real; require constraint { m.eff >= minimum } }
+        requirement <'STK-1'> parent {
+            requirement <'CMP-1'> child : Eff { attribute :>> minimum = 0.8; }
         }
+        satisfy parent.child by m1;
     }"""
-    r = client.post("/parse", json={"files": [{"name": "V.sysml", "text": src}]}).json()
+    r = client.post("/parse", json={"files": [{"name": "S.sysml", "text": src}]}).json()
     assert not [d for d in r["diagnostics"] if d["severity"] == "error"]
-    # the chain battery.cap ends at the requirement usage the test verifies
-    assert [(e["source"], e["target"]) for e in r["graph"]["edges"] if e["kind"] == "verify"] == [("V__Bench", "V__Battery__cap")]
-
-
-def test_short_names_are_ids_on_nodes():
-    src = """package V {
-        private import ScalarValues::*;
-        abstract requirement def <'LIB-1'> Min { attribute minimum : Real; }
-        part def Battery { requirement <'BAT-1'> cap : Min; }
-    }"""
-    r = client.post("/parse", json={"files": [{"name": "V.sysml", "text": src}]}).json()
-    ids = {n["id"]: n.get("shortName") for n in r["graph"]["nodes"]}
-    assert ids["V__Min"] == "LIB-1" and ids["V__Battery__cap"] == "BAT-1"
+    nodes = {n["id"]: n for n in r["graph"]["nodes"]}
+    assert nodes["S__parent"]["shortName"] == "STK-1" and nodes["S__parent__child"]["shortName"] == "CMP-1"
+    assert [(e["source"], e["target"]) for e in r["graph"]["edges"] if e["kind"] == "satisfy"] == [("S__m1", "S__parent__child")]
