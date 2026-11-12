@@ -66,6 +66,28 @@ def test_multirotor_has_a_part_per_rotor_and_metrics():
     assert not res.warnings
 
 
+def test_blades_follow_the_stations_and_the_frame_its_tubes():
+    cat = catalog()
+    frame, _, prop = cat["instances"][:3]
+    prop["values"].update(stations="(0.2, 0.6, 1)", chord="(0.15, 0.12, 0.05)", twist="(30, 12, 6)", bladeCount="3", hubRadius="0.12")
+    frame["values"].update(armOuterDiameter="22", hubDiameter="220")
+    res = generators.build(cat, "A::Cfg::d1")
+    prop1 = next(p for p in res.scene.parts if p.name == "propellers[1]")
+    hubcap = gltf.cylinder((0, 0, 0), (0, 1, 0), 1, 16)
+    # 3 blades, each 4 sections (hub root + 3 stations) of 2 vertices, plus the hubcap
+    assert len(prop1.mesh.positions) == 3 * 4 * 2 + len(hubcap.positions)
+    # the tip of each blade at the propeller radius from the rotor axis
+    arm = next(p for p in res.scene.parts if p.name == "airframe/arm1")
+    assert max(abs(v[0]) for v in arm.mesh.positions) < 0.7 / 2 + 0.012  # 11 mm tube radius
+    xs = [math.hypot(v[0], v[2]) for v in next(p for p in res.scene.parts if p.name == "airframe/hub").mesh.positions]
+    assert max(xs) == pytest.approx(0.11, abs=1e-6)
+    assert generators.sequence({"twist": "(30, 12.5, -1e-1)"}, "twist") == [30, 12.5, -0.1]
+    # a twisted blade: the chord line rises towards the leading edge, more at the root
+    blade = generators.blade_surface((0, 0, 0), 0.0, 1.0, [0.2, 1.0], [0.1, 0.1], [30, 6], 0.2)
+    rise = [blade.positions[i][1] - blade.positions[i + 1][1] for i in (0, 2)]
+    assert rise[0] > rise[1] > 0
+
+
 def test_overlapping_propellers_are_flagged():
     res = generators.build(catalog(wheelbase=450, prop=15), "A::Cfg::d1")
     assert res.metrics["tipClearance"] < 0

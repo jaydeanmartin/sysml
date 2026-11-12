@@ -190,6 +190,8 @@ export interface Requirement {
   id: string;
   kind: string;
   name: string;
+  /** its id: the SysML short name */
+  shortName?: string | null;
   qualifiedName: string;
   doc: string | null;
   constraints: { kind: string; text: string }[];
@@ -242,8 +244,14 @@ export interface Component extends Located {
   /** a behavior's in parameters, set by the system that performs it */
   params: CatalogAttribute[];
   ports: { name: string; type: string | null; declaredIn: string | null }[];
-  parts: { name: string; type: string | null; multiplicity: string | null }[];
+  /** its part features; those typed by a component (a material) list the instances that can fill them */
+  parts: { name: string; type: string | null; multiplicity: string | null; candidates: string[] }[];
   instances: string[];
+  /** component analyses (tool-bound defs with this component as subject) */
+  analyses: string[];
+  /** requirement usages its instances give numbers to */
+  requirementUsages: RequirementUsage[];
+  lineageIds: string[];
 }
 
 export interface ComponentInstance extends Located {
@@ -256,6 +264,11 @@ export interface ComponentInstance extends Located {
   ownValues: Record<string, string>;
   /** parameters still without a value: such a behavior instance cannot be performed */
   missing: string[];
+  requirementUsages: RequirementUsage[];
+  /** "usage.attribute" of required requirement values still unset */
+  missingRequirementValues: string[];
+  /** component-typed part -> the instance that fills it (a propeller's material) */
+  parts: Record<string, string | null>;
 }
 
 export interface Slot {
@@ -293,13 +306,148 @@ export interface Architecture extends Located {
   missionRequirements: string[];
   /** mission simulations this architecture can be the subject of */
   simulations: string[];
+  requirementUsages: RequirementUsage[];
+  lineageIds: string[];
 }
 
 export interface CatalogRequirement extends Located {
-  subject: string;
-  subjectTypeId: string;
+  /** its id: the SysML short name, requirement def <'SYS-01'> Name */
+  shortId: string | null;
+  /** null: no subject (a library requirement such as MinimumValue) */
+  subject: string | null;
+  subjectType: string | null;
+  subjectTypeId: string | null;
   /** names of its in parameters (mission requirements have some) */
   params: string[];
+  isAbstract: boolean;
+  /** abstract, or leaves an attribute without a value: used through requirement usages whose instances state the numbers */
+  template: boolean;
+  /** its attributes (inherited included); those without a value are set by a usage or an instance */
+  thresholds: { name: string; type: string | null; value: string | null }[];
+  specializes: string[];
+  /** the def and every requirement def it specializes */
+  lineage: string[];
+  constraints: { kind: string; text: string }[];
+  /** nested requirement usages */
+  children: { name: string; type: string | null }[];
+  /** simulations that verify it */
+  verifiedBy: string[];
+  /** tests (verification defs, simulations included) that verify it */
+  tests: string[];
+}
+
+/** an attribute of a requirement usage's def: a threshold when the def leaves it without a value */
+export interface RequirementThreshold {
+  name: string;
+  type: string | null;
+  /** the def leaves it without a value: a usage or each instance sets it */
+  required: boolean;
+  value: string | null;
+  /** where the value comes from */
+  setBy: string | null;
+}
+
+/** a requirement usage of a def (component, architecture, behavior, mission type) or as an instance redefines it */
+export interface RequirementUsage {
+  name: string;
+  /** dotted path from the owner: "delivery.payload" for a nested one */
+  path: string;
+  def: string | null;
+  defName: string | null;
+  /** its id (short name of its most specific declaration), and its def's */
+  shortId: string | null;
+  defShortId: string | null;
+  /** the short name its declaration gives it; a redefinition restates it */
+  declaredShortId: string | null;
+  defLineage: string[];
+  /** text; {name} stands for the value of attribute name */
+  doc: string | null;
+  constraints: { kind: string; text: string }[];
+  /** its def has a subject: checked with the owner as subject */
+  subject: boolean;
+  /** in parameters: supplied when checked (by a simulation or mission totals) */
+  params: string[];
+  thresholds: RequirementThreshold[];
+  values: Record<string, string>;
+  /** the values the instance itself states */
+  ownValues: Record<string, string>;
+  bound: string[];
+  /** required values still unset */
+  missing: string[];
+  /** qualified names of the usages that declare or redefine it */
+  declarations: string[];
+  declaredIn: string | null;
+  loc: Loc | null;
+  modelId: string | null;
+  children: RequirementUsage[];
+}
+
+/** a verification def: a test of the requirements its objective verifies */
+export interface CatalogTest extends Located {
+  /** simulation: bound to an external analysis; analysis: the requirement is evaluated against the model */
+  method: "simulation" | "analysis";
+  toolName: string | null;
+  subject: string | null;
+  subjectType: string | null;
+  subjectTypeId: string | null;
+  /** requirement defs and requirement usages it verifies */
+  verifies: string[];
+}
+
+export type RequirementVerdict = "holds" | "fails" | "error" | "missing" | "cannot fly";
+
+export interface TestRef {
+  qualifiedName: string;
+  name: string;
+  method: "simulation" | "analysis";
+  toolName: string | null;
+  modelId: string | null;
+  loc: Loc | null;
+  /** inherited from the parent requirement of this name */
+  via?: string;
+}
+
+/** a node of a system instance's requirement hierarchy */
+export interface RequirementNode {
+  kind: "system" | "group" | "component" | "behavior" | "mission" | "requirement";
+  key: string;
+  name: string;
+  /** system, component, behavior: the instance; mission: the mission */
+  element?: string | null;
+  /** the slot's or mission's type */
+  type?: string | null;
+  multiplicity?: string | null;
+  modelId?: string | null;
+  loc?: Loc | null;
+  children: RequirementNode[];
+  /** the worst verdict of the node and everything below it */
+  rollup?: RequirementVerdict | null;
+  // requirement nodes
+  shortId?: string | null;
+  defShortId?: string | null;
+  path?: string | null;
+  def?: string | null;
+  defName?: string | null;
+  doc?: string | null;
+  constraints?: { kind: string; text: string }[];
+  thresholds?: { name: string; type: string | null; value: string | null; required?: boolean; setBy?: string | null }[];
+  params?: string[];
+  missing?: string[];
+  origin?: string;
+  tests?: TestRef[];
+  verdict?: RequirementVerdict | null;
+  verifiedBy?: { method: string | null; by?: string | null; values?: Record<string, number | null> | null; note?: string | null };
+  // mission nodes, once checked
+  problems?: string[];
+  totals?: Record<string, number | null>;
+}
+
+export interface RequirementTree {
+  system: string;
+  tree: RequirementNode;
+  tests: TestRef[];
+  errors?: string[];
+  runId?: string | null;
 }
 
 /** a #Mission action def; each attribute is a total over the steps */
@@ -307,6 +455,8 @@ export interface MissionType extends Located {
   isAbstract: boolean;
   specializes: string[];
   totals: CatalogAttribute[];
+  requirementUsages: RequirementUsage[];
+  lineageIds: string[];
 }
 
 export interface MissionStep {
@@ -321,6 +471,8 @@ export interface Mission extends Located {
   missionTypeId: string;
   missionType: string;
   steps: MissionStep[];
+  requirementUsages: RequirementUsage[];
+  missingRequirementValues: string[];
 }
 
 /** a mission as one system instance flies it */
@@ -365,6 +517,8 @@ export interface SystemConfiguration extends Located {
   assignments: Record<string, string | null>;
   /** behavior slot -> qualified name of the behavior instance performed */
   behaviors: Record<string, string | null>;
+  requirementUsages: RequirementUsage[];
+  missingRequirementValues: string[];
 }
 
 export interface Catalog {
@@ -377,9 +531,59 @@ export interface Catalog {
   requirements: CatalogRequirement[];
   /** defs bound to an external analysis (ToolExecution) with a system subject */
   simulations: MissionSimulationDef[];
+  /** verification defs (simulations included) */
+  tests: CatalogTest[];
+  /** tool-bound defs whose subject is a component, run for a catalog instance */
+  componentAnalyses: ComponentAnalysisDef[];
   packages: { qualifiedName: string; modelId: string | null; modelName: string | null; loc: Loc | null }[];
   tags: Record<string, string>;
   diagnostics: Diagnostic[];
+}
+
+export interface ComponentAnalysisDef extends Located {
+  toolName: string;
+  subject: string;
+  subjectTypeId: string;
+  inputs: { name: string; value: string }[];
+  outputs: string[];
+}
+
+/** a component analysis run for one catalog instance */
+export interface ComponentAnalysisResult {
+  instance: string;
+  component: string;
+  analysis: string;
+  toolName: string;
+  runId: string;
+  inputs: Record<string, unknown>;
+  outputs: Record<string, unknown>;
+  units: Record<string, string>;
+  /** the instance's values of the outputs that are attributes of its component */
+  current: Record<string, string | null>;
+}
+
+/** what propellerAero returns besides the fitted coefficients */
+export interface PropellerAeroOutputs {
+  ct0: number;
+  ct1: number;
+  ct2: number;
+  cp0: number;
+  cp1: number;
+  cp2: number;
+  thrustPerWatt: number | null;
+  curve: { J: number; CT: number; CP: number; eta: number; converged: boolean }[];
+  span: { rR: number; chord: number; twist: number; alpha: number; cl: number; cd: number; inflow: number; swirl: number; dT: number; dQ: number; loss: number }[];
+  sections: {
+    station: number; airfoil: string; reynolds: number; mach: number; source: string; converged: number; requested: number;
+    alphaStall: number; clMax: number; cdMin: number; alpha: number[]; cl: number[]; cd: number[]; warning: string | null;
+  }[];
+  fitRange: [number, number];
+  fitError: { CT: number; CP: number };
+  staticThrust: number;
+  staticPower: number;
+  referenceRpm: number;
+  figureOfMerit: number | null;
+  warnings: string[];
 }
 
 export interface CatalogChange {
@@ -398,6 +602,10 @@ export interface InstanceRequest {
   values: Record<string, string>;
   package?: string | null;
   replace?: string | null;
+  /** requirement value ("usage.attribute") -> number; omitted on a rewrite: keep the current ones */
+  requirements?: Record<string, string>;
+  /** component-typed part -> instance; omitted on a rewrite: keep the current ones */
+  parts?: Record<string, string | null>;
 }
 
 export interface ConfigurationRequest {
@@ -409,6 +617,8 @@ export interface ConfigurationRequest {
   behaviors?: Record<string, string | null>;
   package?: string | null;
   replace?: string | null;
+  /** requirement value ("usage.attribute") -> number; omitted on a rewrite: keep the current ones */
+  requirements?: Record<string, string>;
 }
 
 export interface StepRequest {
@@ -423,6 +633,8 @@ export interface MissionRequest {
   steps: StepRequest[];
   package?: string | null;
   replace?: string | null;
+  /** requirement value ("usage.attribute") -> number; omitted on a rewrite: keep the current ones */
+  requirements?: Record<string, string>;
 }
 
 export interface ComponentRequest {
@@ -435,6 +647,8 @@ export interface ComponentRequest {
   attributes: { name: string; type: string }[];
   ports: { name: string; type: string }[];
   params?: { name: string; type: string }[];
+  /** requirement usages typed by library requirement defs; values bind some attributes (e.g. actual = energy) */
+  requirements?: { name: string; type: string; values: Record<string, string> }[];
 }
 
 /** a part of a generated scene (glTF node extras) */
@@ -572,6 +786,7 @@ export interface SimulationRequest {
   simulation: string | null;
   mission: string | null;
   draft: StepRequest[] | null;
+  draftRequirements?: Record<string, string> | null;
   systems: string[] | null;
 }
 

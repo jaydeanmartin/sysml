@@ -411,6 +411,8 @@ class GraphBuilder:
             "header": header[:300],
             "redefines": _ref(el.get("redefines")),
         }
+        if el.get("declaredShortName"):
+            node["shortName"] = el["declaredShortName"]  # <'REQ-1'>: a requirement's id
         if tool:
             node["tool"] = tool
         self.nodes[el["@id"]] = node
@@ -538,6 +540,12 @@ class GraphBuilder:
         if rs:
             req = _ref(rs.get("referencedFeature"))
         req = req or _ref(el.get("subsets")) or _ref(el.get("satisfiedRequirement"))
+        if req not in self.nodes:
+            # a requirement usage reached through a chain such as `drone.endurance`:
+            # the edge goes to the usage the chain ends at
+            target = self.by_id.get(req or "")
+            if target and target.get("chainingFeature"):
+                req = _refs(target["chainingFeature"])[-1]
         if kind == "verify" and req not in self.nodes:
             # a verified requirement declared by its definition: the edge goes to the def
             req = next((r for r in _refs(el.get("type")) if r in self.nodes), req)

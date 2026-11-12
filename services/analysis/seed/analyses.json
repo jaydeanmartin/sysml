@@ -270,5 +270,112 @@
         "name": "timeline"
       }
     ]
+  },
+  {
+    "name": "propellerAero",
+    "kind": "external",
+    "description": "Propeller aerodynamics: XFOIL polars of the blade sections at their Reynolds and Mach numbers, and a blade-element momentum model with Prandtl tip and hub losses; thrust and power coefficients against advance ratio, fitted as CT, CP quadratics (aero service).",
+    "endpointUrl": "http://aero:8012/propeller",
+    "inputs": [
+      {
+        "name": "diameter",
+        "unit": "in"
+      },
+      {
+        "name": "bladeCount"
+      },
+      {
+        "name": "stations",
+        "description": "r/R of each blade station, ascending"
+      },
+      {
+        "name": "chord",
+        "description": "chord / tip radius at each station"
+      },
+      {
+        "name": "twist",
+        "unit": "deg",
+        "description": "chord line to the rotation plane at each station"
+      },
+      {
+        "name": "airfoil",
+        "description": "XFOIL airfoil, e.g. 'NACA 4412', or one per station"
+      },
+      {
+        "name": "hubRadius",
+        "description": "r/R where the blade starts"
+      },
+      {
+        "name": "tipSpeed",
+        "unit": "m/s",
+        "description": "reference rotor speed for the section Reynolds and Mach numbers"
+      },
+      {
+        "name": "airDensity",
+        "unit": "kg/m3"
+      },
+      {
+        "name": "ncrit",
+        "description": "XFOIL transition amplification (9: quiet air)"
+      }
+    ],
+    "outputs": [
+      {
+        "name": "ct0"
+      },
+      {
+        "name": "ct1"
+      },
+      {
+        "name": "ct2"
+      },
+      {
+        "name": "cp0"
+      },
+      {
+        "name": "cp1"
+      },
+      {
+        "name": "cp2"
+      },
+      {
+        "name": "thrustPerWatt",
+        "unit": "N/W"
+      },
+      {
+        "name": "staticThrust",
+        "unit": "N"
+      },
+      {
+        "name": "staticPower",
+        "unit": "W"
+      },
+      {
+        "name": "referenceRpm",
+        "unit": "rpm"
+      },
+      {
+        "name": "figureOfMerit"
+      },
+      {
+        "name": "fitRange"
+      },
+      {
+        "name": "fitError"
+      },
+      {
+        "name": "curve"
+      },
+      {
+        "name": "span"
+      },
+      {
+        "name": "sections"
+      },
+      {
+        "name": "warnings"
+      }
+    ],
+    "timeoutSeconds": 120
   }
 ]

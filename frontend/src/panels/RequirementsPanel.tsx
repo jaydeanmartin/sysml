@@ -17,7 +17,7 @@ export function RequirementsPanel({ modelId, refreshKey, dirty, graph, onReveal,
   const [reqs, setReqs] = useState<Requirement[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [checking, setChecking] = useState(false);
-  const [form, setForm] = useState({ name: "", id: "", text: "", subjectName: "subj", subjectType: "", constraint: "" });
+  const [form, setForm] = useState({ name: "", id: "", text: "", subjectName: "subj", subjectType: "", constraint: "", abstract: false, thresholds: "" });
   const [showForm, setShowForm] = useState(false);
 
   useEffect(() => {
@@ -28,7 +28,7 @@ export function RequirementsPanel({ modelId, refreshKey, dirty, graph, onReveal,
   const add = () => {
     if (!/^[A-Za-z_]\w*$/.test(form.name)) return;
     onInsert(requirementSnippet(form));
-    setForm({ ...form, name: "", id: "", text: "", constraint: "" });
+    setForm({ ...form, name: "", id: "", text: "", constraint: "", thresholds: "" });
     setShowForm(false);
   };
 
@@ -85,10 +85,28 @@ export function RequirementsPanel({ modelId, refreshKey, dirty, graph, onReveal,
               <input value={form.subjectName} onChange={(e) => setForm({ ...form, subjectName: e.target.value })} />
             </label>
           </div>
+          <div className="grid2">
+            <label className="inline">
+              <input type="checkbox" checked={form.abstract} onChange={(e) => setForm({ ...form, abstract: e.target.checked, subjectType: e.target.checked ? "" : form.subjectType, thresholds: e.target.checked && !form.thresholds ? "actual, maximum" : form.thresholds })} />{" "}
+              abstract library requirement (components, architectures, behaviors and missions include it; each instance states the numbers)
+            </label>
+            {form.abstract && (
+              <label>
+                Values left open (attributes)
+                <input className="mono" value={form.thresholds} placeholder="actual, maximum" onChange={(e) => setForm({ ...form, thresholds: e.target.value })} />
+              </label>
+            )}
+          </div>
           <label>
             Constraint (SysML expression, optional)
-            <input value={form.constraint} placeholder="subj.stoppingDistance <= 40" onChange={(e) => setForm({ ...form, constraint: e.target.value })} />
+            <input value={form.constraint} placeholder={form.abstract ? "actual <= maximum" : "subj.stoppingDistance <= 40"} onChange={(e) => setForm({ ...form, constraint: e.target.value })} />
           </label>
+          {form.abstract && (
+            <div className="hint">
+              Write {"{maximum}"} in the text to show each instance's number. Include it with <code>requirement name : {form.name || "Name"} {"{ attribute :>> actual = … ; }"}</code> in a def; the
+              Library, Configurator and Missions forms then ask every instance for the values left open.
+            </div>
+          )}
           <div className="row-end">
             <button onClick={() => setShowForm(false)}>Cancel</button>
             <button className="primary" disabled={!/^[A-Za-z_]\w*$/.test(form.name)} onClick={add}>
@@ -112,7 +130,10 @@ export function RequirementsPanel({ modelId, refreshKey, dirty, graph, onReveal,
           {reqs.map((r) => (
             <tr key={r.id} onClick={() => r.loc && onReveal(r.loc, r.id)} className="clickable">
               <td>
-                <div className="strong">{r.name}</div>
+                <div className="strong">
+                  {r.shortName && <span className="req-id">{r.shortName}</span>}
+                  {r.name}
+                </div>
                 <div className="muted small">{r.kind}{r.typeName ? ` : ${r.typeName}` : ""}</div>
               </td>
               <td>

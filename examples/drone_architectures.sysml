@@ -42,6 +42,13 @@ package DroneArchitectures {
         attribute endurance : Real = battery.energy * 0.8 * 60 / hoverPower;   // min of hover, 20 % reserve
         attribute peakPower : Real = rotorCount * motors.maxPower#(1);        // W
         attribute propClearance : Real = airframe.wheelbase * spacing - propellers.diameter#(1) * 25.4;   // mm between tips
+
+        // a composite requirement from the library: what it constrains is bound
+        // here, the numbers are stated by each system instance
+        requirement delivery : DeliveryPerformance {
+            requirement :>> payload { attribute :>> actual = payloadCapacity / (1 [SI::kg]); }
+            requirement :>> massClass { attribute :>> actual = takeoffMass / (1 [SI::kg]); }
+        }
     }
 
     #SystemArchitecture part def Quadcopter :> DeliveryDrone {
@@ -65,36 +72,65 @@ package DroneArchitectures {
     }
 
     // ---------------------------------------------------------- requirements
+    // A composite requirement: its nested requirements are library requirements
+    // (MinimumValue, MaximumValue), each with its own number per system instance.
+    // Without ids of their own, they are numbered from its id: SYS-07.1, SYS-07.2.
+    requirement def <'SYS-07'> DeliveryPerformance {
+        doc /* The drone shall carry its rated parcel within its operating mass class. */
+        requirement payload : MinimumValue {
+            doc /* The payload capacity shall be at least the rated {minimum} kg. */
+        }
+        requirement massClass : MaximumValue {
+            doc /* The takeoff mass shall stay within the {maximum} kg class it is operated in. */
+        }
+    }
+
     // Checked for every system instance by the Configurator (subject: DeliveryDrone).
-    requirement def ThrustToWeightRequirement {
+    requirement def <'SYS-01'> ThrustToWeightRequirement {
         doc /* Full-throttle thrust shall be at least twice the weight at maximum takeoff mass. */
         subject drone : DeliveryDrone;
         require constraint { drone.thrustToWeight >= 2.0 }
     }
-    requirement def EnduranceRequirement {
+    requirement def <'SYS-02'> EnduranceRequirement {
         doc /* The drone shall hover for at least 15 minutes with a full payload, keeping a 20 % battery reserve. */
         subject drone : DeliveryDrone;
         require constraint { drone.endurance >= 15 }
     }
-    requirement def FrameLoadRequirement {
+    requirement def <'SYS-03'> FrameLoadRequirement {
         doc /* The takeoff mass shall not exceed the frame's rated maximum takeoff mass. */
         subject drone : DeliveryDrone;
         require constraint { drone.takeoffMass <= drone.airframe.maxTakeoffMass }
     }
-    requirement def PropellerClearanceRequirement {
+    requirement def <'SYS-04'> PropellerClearanceRequirement {
         doc /* Adjacent propeller tips shall not overlap. */
         subject drone : DeliveryDrone;
         require constraint { drone.propClearance >= 0 }
     }
-    requirement def PropellerSizeRequirement {
+    requirement def <'SYS-05'> PropellerSizeRequirement {
         doc /* The propeller shall be no larger than the motor's largest rated propeller. */
         subject drone : DeliveryDrone;
         require constraint { drone.propellers.diameter#(1) <= drone.motors.maxPropDiameter#(1) }
     }
-    requirement def BatteryPowerRequirement {
+    requirement def <'SYS-06'> BatteryPowerRequirement {
         doc /* The battery shall supply every motor at full throttle. */
         subject drone : DeliveryDrone;
         require constraint { drone.peakPower <= drone.battery.maxPower }
+    }
+
+    // ---------------------------------------------------------- tests
+    verification def WeighAndLoadTest {
+        doc /* Ground test: the drone is weighed at takeoff mass and its rated parcel loaded, then a full-throttle tethered thrust run. */
+        subject drone : DeliveryDrone;
+        objective {
+            verify drone.delivery;
+            verify requirement : ThrustToWeightRequirement;
+            verify requirement : FrameLoadRequirement;
+        }
+    }
+    verification def HoverEnduranceTest {
+        doc /* Hover with the rated parcel until the 20 % reserve is reached. */
+        subject drone : DeliveryDrone;
+        objective { verify requirement : EnduranceRequirement; }
     }
 
     // ---------------------------------------------------------- system instances
@@ -112,6 +148,10 @@ package DroneArchitectures {
             perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
             perform action :>> land :> DroneLibrary::Behaviors::landStandard;
             perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
+            requirement :>> delivery {
+                requirement :>> payload { attribute :>> minimum = 1; }
+                requirement :>> massClass { attribute :>> maximum = 4; }
+            }
         }
         part parcel : Quadcopter {
             doc /* Standard 2 kg parcel delivery */
@@ -125,6 +165,10 @@ package DroneArchitectures {
             perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
             perform action :>> land :> DroneLibrary::Behaviors::landStandard;
             perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
+            requirement :>> delivery {
+                requirement :>> payload { attribute :>> minimum = 2; }
+                requirement :>> massClass { attribute :>> maximum = 25; }
+            }
         }
         part parcelLongRange : Quadcopter {
             doc /* The parcel drone with the big battery: flies longer, but too heavy for its motors */
@@ -138,6 +182,10 @@ package DroneArchitectures {
             perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
             perform action :>> land :> DroneLibrary::Behaviors::landStandard;
             perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
+            requirement :>> delivery {
+                requirement :>> payload { attribute :>> minimum = 2; }
+                requirement :>> massClass { attribute :>> maximum = 25; }
+            }
         }
         part regional : Hexacopter {
             doc /* 5 kg parcels, motor-out redundancy */
@@ -151,6 +199,10 @@ package DroneArchitectures {
             perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
             perform action :>> land :> DroneLibrary::Behaviors::landStandard;
             perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
+            requirement :>> delivery {
+                requirement :>> payload { attribute :>> minimum = 5; }
+                requirement :>> massClass { attribute :>> maximum = 25; }
+            }
         }
         part regionalLiIon : Hexacopter {
             doc /* Li-ion pack for endurance: the pack cannot deliver full-throttle power */
@@ -164,6 +216,10 @@ package DroneArchitectures {
             perform action :>> hover :> DroneLibrary::Behaviors::holdPosition;
             perform action :>> land :> DroneLibrary::Behaviors::landGentle;
             perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
+            requirement :>> delivery {
+                requirement :>> payload { attribute :>> minimum = 5; }
+                requirement :>> massClass { attribute :>> maximum = 25; }
+            }
         }
         part heavyLift : Octocopter {
             doc /* 10 kg winch delivery */
@@ -178,6 +234,10 @@ package DroneArchitectures {
             perform action :>> land :> DroneLibrary::Behaviors::landGentle;
             perform action :>> release :> DroneLibrary::Behaviors::releaseIdle;
             perform action :>> winch :> DroneLibrary::Behaviors::winch1;
+            requirement :>> delivery {
+                requirement :>> payload { attribute :>> minimum = 10; }
+                requirement :>> massClass { attribute :>> maximum = 25; }
+            }
         }
     }
 }

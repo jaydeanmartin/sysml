@@ -19,6 +19,7 @@ flowchart LR
   IS -->|spawns| OS[["OpenSysML sysml CLI<br/>(Go, SysML v2 + KerML)"]]
   OS -->|ToolExecution → bridge.py| AS
   AS -->|kind=external| SIM["mission simulator :8011<br/>(missionSimulator, dynamicsSimulator)"]
+  AS -->|kind=external| AERO["aero :8012<br/>(propellerAero: XFOIL + BEMT)"]
   MS -->|invoke missionSimulator| AS
   MS --- PG[(PostgreSQL<br/>schemas: models, analysis)]
   AS --- PG
@@ -31,6 +32,7 @@ flowchart LR
 | `interpreter` | 8002 | Wraps the OpenSysML binary. Endpoints: validate/parse → diagnostics + diagram graph, execute (calc, analysis case, requirement, constraint, satisfy, action, state machine, expression), and OpenSysML's own rendering (Mermaid, DOT, PlantUML, D2). |
 | `analysis` | 8003 | Registry of analyses (`builtin` Python functions, `formula`, `external` REST endpoints). `POST /analyses/{name}/invoke` runs one. Every call is logged together with the id of the run that made it. |
 | `geometry` | 8004 | Generates 3-D geometry of a system instance as binary glTF 2.0, from the component instances in its slots and their attribute values. It reads the project's catalog from the model service, so it stores nothing. |
+| `aero` | 8012 | Propeller aerodynamics, an external analysis registered as `propellerAero`. It runs XFOIL for the polars of the blade sections and a blade-element momentum model for the propeller, and returns thrust and power coefficients against advance ratio, fitted as the quadratics the dynamic simulation uses. |
 | `mission-sim` | 8011 | Mission simulator, an external analysis registered as `missionSimulator`. It flies a mission step by step and returns the battery energy drawn, its share of the pack, the mission time, the state of charge over time, and whether the reserve holds. The same service is also a second external analysis, `dynamicsSimulator` (`POST /dynamics`). It flies the mission through the propulsion chain and returns the energy and power of each behavior, the propeller and motor performance curves, and each behavior's operating point on them. |
 | `postgres` | 5432 | PostgreSQL 16. The model and analysis services each own a schema. |
 
@@ -50,13 +52,14 @@ Things to try in the UI. The left sidebar opens each panel; **«** collapses it 
 3. **Requirements panel.** Capture a requirement with the form; the SysML text is inserted for you. **Check all satisfy relations** runs every `satisfy`, calling any REST analyses the satisfied attributes depend on.
 4. **Execute panel.** Run an action or a state machine to play back the execution trace in both the diagram and the editor. A run that calls REST analyses lists every call it made.
 5. **Analyses panel.** Register an external endpoint or a formula. **Insert SysML binding** generates a `calc def` with the `ToolExecution` metadata that binds to it.
-6. **Library panel.** Browse the component types, the behaviors and their catalog instances. **+ New instance** creates an instance from a form with one field per attribute, or one per parameter for a behavior. A behavior instance is incomplete until every parameter is set (see `cruiseSport`). You can also edit or delete instances and declare new components and behaviors.
+6. **Library panel.** Browse the component types, the behaviors and their catalog instances. **+ New instance** creates an instance from a form with one field per attribute, or one per parameter for a behavior. A behavior instance is incomplete until every parameter is set (see `cruiseSport`). You can also edit or delete instances and declare new components and behaviors. A component's parts typed by another component, such as a propeller's `material`, are chosen from that component's instances. When an analysis applies to the component, **Analyses** runs it for an instance and offers to write the results back (see [Component geometry and analyses](#component-geometry-and-analyses)).
 7. **Configurator panel.** Pick a system architecture. Fill each part slot with a compatible catalog instance, and choose a complete behavior instance for every behavior the architecture performs. Then create the system instance. **Evaluate & check requirements** computes every system instance's derived attributes and checks each applicable requirement def against it, in one run.
 8. **Missions panel.** Build a mission by clicking behaviors in the order they are performed, then set each step's quantities (distance, altitude…). Reorder steps with ↑ ↓ and change a step's behavior from its drop-down. **Evaluate & check missions** flies every mission with every drone and checks the mission requirements. The mission being edited then shows each drone's verdict, plus the step durations and a timeline for the drone you pick under **Flown by**. **▶ Simulate** runs the mission simulator for the mission being edited (saved or draft) with every drone. It shows a chart of battery charge over time with the reserve line, and a table of energy used (Wh and percent of the battery), mission time, charge left, and peak power against the battery's maximum. When more than one simulation applies, pick one beside the title. **DynamicSimulation** also shows:
    - the energy, average power and peak power of each behavior, for every drone;
    - electrical power over time;
    - for the drone you pick, small-multiple charts of the propeller's torque coefficient, thrust/power (CT/CP) and efficiency against advance ratio, and of the motor's torque, speed, shaft power and efficiency against current. Each behavior's operating point is marked on every chart, and hovering one shows its rpm, thrust, torque, current, throttle and efficiencies.
 9. **3-D panel.** Pick a system instance to see its generated geometry. Drag to orbit, scroll to zoom, and click a part to see its component instance (**Show in editor** opens its text). The exploded slider pulls the parts apart. The panel also shows the dimensions and the propeller tip clearance. Overlapping propeller discs are drawn red. The geometry is generated again after every change, so swapping a frame in the Configurator changes the drone on screen.
+10. **Req. hierarchy panel.** Pick a system instance, or select one in the diagram, to see all its requirements in one tree, grouped as System, Components (one entry per slot), Behaviors (one per performed behavior) and Missions. Each requirement shows its text with the instance's numbers filled in, the values it is checked with, and the tests that verify it. A requirement that no test verifies is marked **no test**. **▶ Check requirements** evaluates every requirement against the model and, with **fly missions**, flies each mission and runs the simulations that verify its requirements. Each verdict is rolled up to the requirement, component and group above it. Filter for **Problems** or for requirements **Without a test**, and click a requirement to see its constraints, its values (and where each is set), how it was verified and the measured values.
 
 ## Component library and system configuration
 
@@ -190,9 +193,78 @@ package Missions {
   The propeller, motor and frame catalogs carry these parameters, and the behaviors set the speeds (for example `Cruise` sets `groundSpeed = speed`). The simulation verifies `MissionPeakPowerRequirement` (peak electrical power, transients included, within the battery's maximum) and `ThrottleHeadroomRequirement` (at most 80 % throttle). `regionalLiIon` fails the throttle requirement at 82 %, because its 21.6 V pack sags under load. Descent is treated as hover inflow (no vortex ring state), and edgewise rotor effects are not modelled.
 - **Evaluate & check missions** calls `POST /projects/{id}/catalog/missions/evaluate`. The service writes the flown steps of every mission and drone into a scratch package. One evaluate run gives the step totals, the totals-based verdicts and the simulation inputs. The simulations then run through the analysis service, and a second evaluate run checks the requirements they verify. Nothing is stored except the analysis service's call log.
 
+### Requirement library, hierarchy and tests
+
+Requirements can be written once, in a library, and reused by components, architectures, behaviors and mission types. Each instance then states its own numbers:
+
+```sysml
+abstract requirement def MinimumValue {                 // a library requirement
+    doc /* The value shall be at least {minimum}. */      // {minimum}: shown with each instance's number
+    attribute actual : Real;
+    attribute minimum : Real;                           // attributes without a value: set by a usage or an instance
+    require constraint { actual >= minimum }
+}
+#Component part def Battery {
+    attribute energy : Real;
+    attribute mass : MassValue;
+    requirement specificEnergy : MinimumValue {         // a requirement usage: binds what it constrains
+        attribute :>> actual = energy / (mass / (1 [SI::kg]));
+    }
+}
+part lipo4s5000 : Battery {
+    attribute :>> energy = 74;
+    attribute :>> mass = 0.55 [SI::kg];
+    requirement :>> specificEnergy { attribute :>> minimum = 130; }   // the instance states the number
+}
+verification def BatteryAcceptanceTest {                // a test
+    subject battery : Battery;
+    objective { verify battery.specificEnergy; }        // verifies a usage (or, `verify requirement : Def;`, a def)
+}
+```
+
+- A requirement def is a **template** when it is abstract or leaves an attribute without a value. Templates are never applied by subject type. They are used only through requirement usages.
+- A **requirement usage** can appear in a `#Component` or `#SystemArchitecture` part def, a `#Behavior` action def or a `#Mission` action def. It may bind some of the template's attributes, usually what it constrains (`actual`). It may also nest further requirements, as `DeliveryPerformance` does with `payload` and `massClass`.
+- **Instances must state the actual numbers.** A component or behavior instance, a system instance or a mission redefines each usage and sets the values the usage leaves open, for example `requirement :>> delivery { requirement :>> payload { attribute :>> minimum = 10; } }`. Each value is a number, optionally with a unit. The Library, Configurator and Missions forms ask for these values and show them in the text preview. The service refuses to save an instance that leaves a value unset, uses an expression, or names a value that does not exist. When a rewrite omits `requirements`, the instance keeps the values it has.
+- A **test** is a `verification def`. Its objective names what it verifies: a requirement usage, through its subject (`verify drone.delivery;`), or a requirement def (`verify requirement : EnduranceRequirement;`). A test verifies every usage of that def and of its specializations whose owner conforms to the test's subject type. A nested requirement is also verified by the tests of its parent. A test bound to an external analysis by `ToolExecution` metadata is a **simulation**: it verifies mission requirements with its results, as described above. Any other test is checked by **analysis**: the requirement is evaluated against the model.
+- **How a usage is checked.** The service writes a scratch requirement def that specializes the usage's def and binds each value the usage or the instance sets, reached through the instance: `requirement def r1 :> MinimumValue { attribute :>> minimum = Catalog::lipo4s5000.specificEnergy.minimum; … }`. It then calls that def with the subject. System requirements use the system instance as subject, component requirements the component instance, and behavior requirements the performed behavior (`parcel.cruise`). A mission's usages are checked like the other mission requirements, for every system that flies it, under the key `MissionType.usage`.
+- **Requirement ids** are SysML short names: `requirement def <'SYS-01'> ThrustToWeightRequirement`, `requirement <'BAT-01'> specificEnergy : MinimumValue`. A usage without an id of its own shows its def's id. A nested requirement without one is numbered from its parent: `SYS-07.1`, `SYS-07.2`. A redefinition of a usage that has an id must restate it, `requirement <'BAT-01'> specificEnergy :>> specificEnergy { … }`, because OpenSysML finds such a feature only by its id. The forms write it that way. The ids appear in the hierarchy panel (where **Find** searches them), the Library, the forms, the Configurator and Missions tables and the Requirements panel. The demo numbers system requirements `SYS-`, mission requirements `MSN-`, library requirements `LIB-`, and component and behavior requirements `BAT-` and `CRZ-`.
+- In the demo, the library declares `MinimumValue` and `MaximumValue`. Batteries state the specific energy their datasheet guarantees, and `lipo12s22000` fails it because of the series harness. Cruise profiles state the speed they are cleared for. Each drone states its rated payload and its mass class through the composite `DeliveryPerformance`; `heavyLift`, at 27.7 kg, exceeds its 25 kg class. Each mission states its delivery window (`MissionTimeLimit`, verified by the mission simulation), and the slower drones miss the 18-minute suburban window. `WeighAndLoadTest`, `HoverEnduranceTest`, `BatteryAcceptanceTest` and `CruiseClearanceReview` are the tests. The propeller and battery-power requirements have no test, so they show up under **Without a test**.
+
+## Component geometry and analyses
+
+Components can carry detailed geometry as plain attributes, so analyses can work from it:
+
+- **Materials** are a component, `Material` (density, Young's and shear moduli, Poisson's ratio, strength, fatigue strength), with a catalog of typical materials: `nylonGF30`, `cfrpWoven`, `cfrpTube` and `al6061`. Components refer to them through parts that each instance fills, for example `part :>> material :> nylonGF30;`.
+- **Propeller blades** are described by stations from hub to tip: `stations` (r/R), `chord` (c/R), `twist` (degrees from the rotation plane), `airfoil` (as XFOIL names it, `"NACA 4412"`), `bladeCount` and `hubRadius`. Sequences are declared `Real[*] ordered nonunique`, because a plain `Real[*]` is a set and repeated values would be an error. In the demo, each blade's twist gives the propeller its nominal pitch along the whole span.
+- **Frames** add round-tube arms (`armOuterDiameter`, `armWallThickness`) between two hub plates (`hubDiameter`, `hubPlateThickness`), each with its material.
+
+A **component analysis** is a def bound to an external analysis by `ToolExecution` metadata, whose subject is a component. Its `in` parameters with a value say what the analysis receives, and are evaluated with the catalog instance as subject. Sequences and strings are passed as JSON lists and strings.
+
+```sysml
+analysis def PropellerAerodynamics {
+    metadata ToolExecution { toolName = "propellerAero"; uri = "analysis://propellerAero"; }
+    subject prop : Propeller;
+    in stations : Real[*] ordered nonunique = prop.stations;
+    in airfoil : String = prop.airfoil;
+    in tipSpeed : Real = 110;                       // m/s, the hover speed the section polars are computed at
+    …
+    out ct0 : Real;  …  out thrustPerWatt : Real;
+}
+```
+
+`POST /projects/{id}/catalog/components/analyze` `{"instance"}` runs it through the analysis service, which logs the call under the returned run id. The response also holds the instance's current values of every output that is named like an attribute of its component. The Library's **Analyses** section compares the two and **Write … to *instance*** saves the results as a new version of the instance. Every analysis that uses those values then runs with them.
+
+**Propeller aerodynamics** ([`services/aero`](services/aero)):
+
+1. **Section polars.** For each blade station, XFOIL computes lift and drag against angle of attack, at the station's Reynolds and Mach numbers at the reference tip speed (110 m/s, about hover). It sweeps from 0° up to 20° and, re-initialised, from 0° down to −10°. Angles where XFOIL does not converge are interpolated. Past maximum lift, the Viterna–Corrigan model takes the section to flat-plate lift and drag. Polars are cached by airfoil and by Reynolds number to two significant digits. Below a Reynolds number of 30 000 a polar is computed at 30 000, and above Mach 0.5 at 0.5; the result reports both cases. If XFOIL converges nowhere, a thin-airfoil polar is used and reported.
+2. **Blade-element momentum theory.** Each of 40 blade elements sees the axial speed plus its induced velocity, and the blade speed less the swirl. Blade-element forces are balanced against momentum through the annulus, with Prandtl tip and hub losses. The model is written in induced velocities, so it holds at zero forward speed. It sweeps the advance ratio J from 0 until the thrust is gone, and fits CT = ct0 + ct1 J + ct2 J² and CP = cp0 + cp1 J + cp2 J² over the thrust-producing range. It also returns the static thrust, power, thrust per watt and figure of merit, and the hover loading, angle of attack and induced velocities along the blade (for structural analysis). The model assumes axial flow and uses one polar per station at the reference speed; it does not model edgewise flow, blade flexing or rotational stall delay.
+3. **XFOIL** (Drela, MIT, GPL) is Debian's package, run headless in batch mode. Debian builds it with floating-point traps on, so a NaN that XFOIL would recover from aborts it. A small library, preloaded into the XFOIL process only, turns the trap setup off ([`services/aero/docker/nofpe.c`](services/aero/docker/nofpe.c)). A propeller takes about 2 s.
+
+In the demo, the analysis estimates lower thrust and power coefficients than the catalog's hand-entered ones: for `prop15x5`, CT₀ 0.067 and CP₀ 0.019 against 0.105 and 0.036. Its thrust per watt, 0.101 N/W, is close to the catalog's 0.11. The catalog values are left as they were, so the mission results described above still hold. Write the analysis values to see their effect.
+
 ## Geometry
 
-The geometry service (`services/geometry`) turns a system instance into a glTF 2.0 scene. Each part is one mesh. Its glTF node `extras` hold the slot, the element index of a multiple slot, and the component instance with its values. The scene `extras` hold the generator, the metrics (in metres) and any warnings. The service picks a generator from the component types in the architecture's slots:
+The geometry service (`services/geometry`) turns a system instance into a glTF 2.0 scene. A propeller that gives its blade stations is drawn as twisted blades of its chord, and a frame that gives them is drawn with its arm tube diameter and hub diameter. Each part is one mesh. Its glTF node `extras` hold the slot, the element index of a multiple slot, and the component instance with its values. The scene `extras` hold the generator, the metrics (in metres) and any warnings. The service picks a generator from the component types in the architecture's slots:
 
 - **multirotor**: the architecture has slots typed by `Frame`, `Motor` and `Propeller`, or by specializations of them. One arm, motor and propeller is drawn per element of the motor slot (`part :>> motors[6];`), on a circle of the frame's `wheelbase` (mm) in an X layout. Propellers have the propeller's `diameter` (in). Motors are sized from their `mass`. The battery (from its `mass`) sits on the hub. The payload hangs between the landing skids: a box of its `volume` (l), or a winch drum with a tether if it has a `tetherLength`. The service reports the tip clearance between adjacent propellers, the same quantity as the architecture's `propClearance`.
 - **generic**: any other architecture. Each slot element is a box sized by its `mass` and laid out in a grid. An open slot is drawn as a grey placeholder.
@@ -263,6 +335,10 @@ Interactive OpenAPI docs are served at `/docs` on each service, e.g. http://loca
 - `POST /projects/{id}/catalog/missions` `{"missionType", "name", "steps": [{"behavior", "values": {quantity: expr}}], "doc"?, "package"?, "replace"?}`
 - `POST /projects/{id}/catalog/missions/simulate` `{"missionType", "simulation"?: simulation def, "mission"? | "draft"?: [steps], "systems"?: [system instance]}`: the mission simulated for each system instance (simulation inputs, the analysis' outputs, or why it cannot be flown) and the run id the analysis service logged the calls under
 - `POST /projects/{id}/catalog/missions/evaluate` `{"missionType", "draft"?: [steps]}`: every mission (and the draft) flown by every system instance that performs behaviors: per-step values, totals, mission requirement verdicts with how each was verified (simulation or evaluation) and the values used, or why it cannot be flown
+- `GET /projects/{id}/catalog/requirement-tree?system=`: the requirement hierarchy of a system instance (system, components, behaviors, missions), with each requirement's def, text, values, nested requirements and verifying tests
+- `POST /projects/{id}/catalog/requirement-tree/check` `{"system", "missions"?: true}`: the same tree with a `verdict` (holds, fails, error, missing, cannot fly) and `verifiedBy` on every requirement, and a `rollup` on every node
+- Creating or rewriting an instance, system instance or mission takes `"requirements": {"usage.attribute": "number"}` (nested usages: `"delivery.payload.minimum"`). Mission evaluation and simulation take the draft's values as `draftRequirements`.
+- `POST /projects/{id}/catalog/components/analyze` `{"instance", "analysis"?}`: run a component analysis for a catalog instance: its inputs, outputs, and the instance's current values of the outputs that are attributes. Instances also take `"parts": {"material": "Lib::Catalog::cfrpWoven"}`.
 - `DELETE /projects/{id}/catalog/elements?qualifiedName=`
 
 **SysML v2 API** (Systems Modeling API and Services 1.0, REST/HTTP PSM): base URL `http://localhost:8001/sysml-v2`, or `http://localhost:8080/api/sysml-v2` through the gateway
@@ -337,6 +413,7 @@ export DATABASE_URL=postgresql://sysml:sysml@localhost:5432/sysml
    ANALYSIS_SERVICE_URL=http://localhost:8003 EXAMPLES_DIR=../../examples uvicorn app.main:app --port 8001) &
 (cd services/geometry && pip install -r requirements.txt && MODEL_SERVICE_URL=http://localhost:8001 uvicorn app.main:app --port 8004) &
 (cd services/mission-sim && pip install -r requirements.txt && uvicorn app.main:app --port 8011) &
+(cd services/aero && pip install -r requirements.txt && uvicorn app.main:app --port 8012) &   # needs xfoil on the PATH
 (cd frontend && npm install && npm run dev)   # http://localhost:5173 (Vite proxies /api/*)
 ```
 
@@ -352,6 +429,7 @@ DATABASE_URL=postgresql://sysml:sysml@localhost:5432/sysml pytest services/analy
 # geometry and mission simulator tests need nothing else
 cd services/geometry && pytest
 cd services/mission-sim && pytest
+cd services/aero && pytest         # the XFOIL tests are skipped without xfoil
 # or, inside the running stack:
 docker compose exec interpreter pytest
 ```

@@ -19,6 +19,8 @@ interface Props {
   /** a saved mission, or null to simulate the draft steps */
   mission: string | null;
   draft: StepRequest[] | null;
+  /** the draft's requirement values */
+  draftRequirements?: Record<string, string> | null;
   label: string;
   /** every system instance of the project, in catalog order (fixes each one's color) */
   systems: SystemConfiguration[];
@@ -33,7 +35,7 @@ interface Props {
 /** Runs the mission simulation (an external analysis, through the model service)
  *  for every system instance that can fly the mission and shows battery energy,
  *  percent of the pack, mission time and the state of charge over time. */
-export function MissionSimulation({ projectId, missionType, mission, draft, label, systems, simulations, ensureSaved, refreshKey, disabled }: Props) {
+export function MissionSimulation({ projectId, missionType, mission, draft, draftRequirements, label, systems, simulations, ensureSaved, refreshKey, disabled }: Props) {
   const [simQn, setSimQn] = useState<string | null>(simulations[0]?.qualifiedName ?? null);
   const simDef = simulations.find((s) => s.qualifiedName === simQn) || simulations[0];
   const [res, setRes] = useState<SimulationResult | null>(null);
@@ -41,7 +43,7 @@ export function MissionSimulation({ projectId, missionType, mission, draft, labe
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [focus, setFocus] = useState<string | null>(null);
-  const key = `${simDef?.qualifiedName}|${mission || `draft:${JSON.stringify(draft)}`}`;
+  const key = `${simDef?.qualifiedName}|${mission || `draft:${JSON.stringify(draft)}${JSON.stringify(draftRequirements || {})}`}`;
   const color = (qn: string) => SERIES[Math.max(0, systems.findIndex((s) => s.qualifiedName === qn)) % SERIES.length];
 
   const run = async () => {
@@ -49,7 +51,7 @@ export function MissionSimulation({ projectId, missionType, mission, draft, labe
     setBusy(true);
     setError(null);
     try {
-      setRes(await api.simulateMission(projectId, { missionType, simulation: simDef?.qualifiedName ?? null, mission, draft: mission ? null : draft, systems: null }));
+      setRes(await api.simulateMission(projectId, { missionType, simulation: simDef?.qualifiedName ?? null, mission, draft: mission ? null : draft, draftRequirements: mission ? null : draftRequirements, systems: null }));
       setForKey(key);
     } catch (e) {
       setError(errorText(e));

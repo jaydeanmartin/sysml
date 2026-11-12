@@ -17,6 +17,8 @@ package DroneMissions {
         attribute duration : Real;
         attribute distance : Real;
         attribute hoverTime : Real;
+        // every mission states the delivery window promised to its customers
+        requirement <'MSN-06'> deliveryWindow : MissionTimeLimit;
     }
 
     // ---------------------------------------------------------- mission requirements
@@ -25,20 +27,28 @@ package DroneMissions {
     // are supplied by the mission simulation that verifies it (see below);
     // a requirement no simulation verifies takes the mission totals of the
     // same names instead, summed over the steps as the system flies them.
-    requirement def MissionEnergyRequirement {
+    requirement def <'MSN-01'> MissionEnergyRequirement {
         doc /* The drone shall fly the mission on one charge, keeping a 20 % battery reserve. */
         subject drone : DeliveryDrone;
         in energyPercent : Real;                // of the battery's energy, used by the mission
         attribute reserve : Real = 0.2;
         require constraint { energyPercent <= 100 * (1 - reserve) }
     }
-    requirement def MissionTimeRequirement {
+    requirement def <'MSN-02'> MissionTimeRequirement {
         doc /* A delivery mission shall take at most 30 minutes. */
         subject drone : DeliveryDrone;
         in missionTime : Real;                  // s
         require constraint { missionTime <= 1800 }
     }
-    requirement def MissionEnduranceEstimate {
+    // An abstract mission requirement: each mission states its own limit.
+    abstract requirement def <'LIB-03'> MissionTimeLimit {
+        doc /* The mission shall be flown within its {maxTime} s delivery window. */
+        subject drone : DeliveryDrone;
+        in missionTime : Real;                  // s, from the simulation that verifies it
+        attribute maxTime : Real;
+        require constraint { missionTime <= maxTime }
+    }
+    requirement def <'MSN-03'> MissionEnduranceEstimate {
         doc /* Design-time estimate: the mission's hover-equivalent time, at full takeoff mass, shall fit in the drone's hover endurance. */
         subject drone : DeliveryDrone;
         in hoverTime : Real;                    // a mission total
@@ -70,6 +80,7 @@ package DroneMissions {
         objective {
             verify requirement energy : MissionEnergyRequirement;
             verify requirement time : MissionTimeRequirement;
+            verify requirement window : MissionTimeLimit;
         }
     }
 
@@ -80,13 +91,13 @@ package DroneMissions {
     // motor's torque, speed and efficiency, and the battery's voltage sag.
     // It reports the energy and power of every behavior, and verifies the
     // requirements that need those dynamics. Still air, constant air density.
-    requirement def MissionPeakPowerRequirement {
+    requirement def <'MSN-04'> MissionPeakPowerRequirement {
         doc /* Across the mission, including acceleration transients, the electrical power shall stay within the battery's maximum power. */
         subject drone : DeliveryDrone;
         in peakPower : Real;                    // W
         require constraint { peakPower <= drone.battery.maxPower }
     }
-    requirement def ThrottleHeadroomRequirement {
+    requirement def <'MSN-05'> ThrottleHeadroomRequirement {
         doc /* The motors shall keep a 20 % throttle margin for control in every behavior of the mission. */
         subject drone : DeliveryDrone;
         in maxThrottle : Real;                  // motor voltage / bus voltage
@@ -141,6 +152,7 @@ package DroneMissions {
             then action cruise_2 : Cruise { attribute :>> distance = 2000; }
             then action land_2 : Land { attribute :>> altitude = 30; }
             then done;
+            requirement <'MSN-06'> deliveryWindow :>> deliveryWindow { attribute :>> maxTime = 600; }
         }
         action suburban : DeliveryMission {
             doc /* 5 km each way, wait for the landing zone, drop off */
@@ -154,6 +166,7 @@ package DroneMissions {
             then action cruise_2 : Cruise { attribute :>> distance = 5000; }
             then action land_2 : Land { attribute :>> altitude = 60; }
             then done;
+            requirement <'MSN-06'> deliveryWindow :>> deliveryWindow { attribute :>> maxTime = 1080; }
         }
         action winchDrop : DeliveryMission {
             doc /* 4 km each way, lower the parcel to a balcony without landing */
@@ -164,6 +177,7 @@ package DroneMissions {
             then action cruise_2 : Cruise { attribute :>> distance = 4000; }
             then action land : Land { attribute :>> altitude = 60; }
             then done;
+            requirement <'MSN-06'> deliveryWindow :>> deliveryWindow { attribute :>> maxTime = 1200; }
         }
         action rural : DeliveryMission {
             doc /* 8 km each way to a farm, drop off */
@@ -176,6 +190,7 @@ package DroneMissions {
             then action cruise_2 : Cruise { attribute :>> distance = 8000; }
             then action land_2 : Land { attribute :>> altitude = 60; }
             then done;
+            requirement <'MSN-06'> deliveryWindow :>> deliveryWindow { attribute :>> maxTime = 1800; }
         }
     }
 }

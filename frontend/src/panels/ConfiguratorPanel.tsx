@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { api } from "../api";
 import type { Architecture, CatalogChange, ComponentInstance, SystemConfiguration } from "../types";
 import { NAME_RE, errorText, partText, ref, short, type CatalogPanelProps } from "./catalogUtil";
+import { missingValues, ownValues, RequirementValues, requirementLines } from "./RequirementValues";
 
 interface Draft {
   name: string;
@@ -10,6 +11,8 @@ interface Draft {
   assignments: Record<string, string | null>;
   /** behavior slot -> behavior instance performed */
   behaviors: Record<string, string | null>;
+  /** requirement value ("usage.attribute") -> number */
+  requirements: Record<string, string>;
   /** qualified name of the system instance being edited; null for a new one */
   replace: string | null;
 }
@@ -52,6 +55,7 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
       package: "",
       assignments: Object.fromEntries(a.slots.map((s) => [s.name, null])),
       behaviors: Object.fromEntries(a.behaviors.map((b) => [b.name, null])),
+      requirements: {},
       replace: null,
     };
   };
@@ -61,6 +65,7 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
     package: c.package || "",
     assignments: { ...c.assignments },
     behaviors: { ...c.behaviors },
+    requirements: ownValues(c.requirementUsages),
     replace: c.qualifiedName,
   });
 
@@ -108,6 +113,7 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
         package: draft.replace ? null : draft.package || null,
         assignments: draft.assignments,
         behaviors: draft.behaviors,
+        requirements: draft.requirements,
         replace: draft.replace,
       })
     );
@@ -188,6 +194,7 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
           [
             ...arch.slots.filter((s) => draft.assignments[s.name]).map((s) => `part :>> ${s.name} :> ${ref(draft.assignments[s.name]!, scope)};`),
             ...arch.behaviors.filter((b) => draft.behaviors[b.name]).map((b) => `perform action :>> ${b.name} :> ${ref(draft.behaviors[b.name]!, scope)};`),
+            ...requirementLines(draft.requirements, arch.requirementUsages),
           ],
           draft.doc
         )
@@ -199,7 +206,9 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
     draft.name !== current.name ||
     draft.doc !== (current.doc || "") ||
     arch!.slots.some((s) => (draft.assignments[s.name] || null) !== (current.assignments[s.name] || null)) ||
-    arch!.behaviors.some((b) => (draft.behaviors[b.name] || null) !== (current.behaviors[b.name] || null));
+    arch!.behaviors.some((b) => (draft.behaviors[b.name] || null) !== (current.behaviors[b.name] || null)) ||
+    JSON.stringify(draft.requirements) !== JSON.stringify(ownValues(current.requirementUsages));
+  const reqMissing = arch && draft ? missingValues(arch.requirementUsages, draft.requirements) : [];
   // every behavior the architecture performs needs a complete behavior instance
   const unperformed = arch && draft ? arch.behaviors.filter((b) => !draft.behaviors[b.name]).map((b) => b.name) : [];
 
@@ -392,12 +401,14 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
                     </tbody>
                   </table>
                 )}
+                <RequirementValues usages={arch.requirementUsages} values={draft.requirements} what="system instance" onChange={(requirements) => setDraft({ ...draft, requirements })} />
                 <code className="block">{preview}</code>
                 <div className="row-end">
+                  {reqMissing.length > 0 && <span className="hint">State the requirement values: {reqMissing.join(", ")}.</span>}
                   {unperformed.length > 0 && <span className="hint">Choose a behavior for {unperformed.join(", ")}: a {arch.name} must perform every behavior.</span>}
                   {open > 0 && <span className="hint">{open} slot{open > 1 ? "s" : ""} left open (kept as the architecture declares {open > 1 ? "them" : "it"}).</span>}
                   {draft.replace && changed && <button onClick={() => current && setDraft(fromConfig(current))}>Revert</button>}
-                  <button className="primary" disabled={busy || !NAME_RE.test(draft.name) || !changed || unperformed.length > 0} onClick={save}>
+                  <button className="primary" disabled={busy || !NAME_RE.test(draft.name) || !changed || unperformed.length > 0 || reqMissing.length > 0} onClick={save}>
                     {busy ? "Saving…" : draft.replace ? "Save system instance" : "Create system instance"}
                   </button>
                 </div>
@@ -431,6 +442,7 @@ export function ConfiguratorPanel({ projectId, catalog, loading, error, dirty, e
                       ))}
                       {arch.requirements.map((r) => (
                         <th key={r} title={catalog.requirements.find((x) => x.qualifiedName === r)?.doc || r}>
+                          {catalog.requirements.find((x) => x.qualifiedName === r)?.shortId && <div className="req-id">{catalog.requirements.find((x) => x.qualifiedName === r)?.shortId}</div>}
                           {short(r)}
                         </th>
                       ))}

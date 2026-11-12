@@ -1,7 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api";
-import type { CatalogAttribute, CatalogChange, Component, ComponentInstance } from "../types";
+import type { CatalogAttribute, CatalogChange, CatalogRequirement, Component, ComponentInstance } from "../types";
 import { NAME_RE, partText, placeholder, ref, short, type CatalogPanelProps } from "./catalogUtil";
+import { ComponentAnalysisCard } from "./ComponentAnalysis";
+import { fillDoc, missingValues, openThresholds, ownValues, ReqId, reqId, RequirementValues, requirementLines, walkUsages } from "./RequirementValues";
 
 interface InstanceForm {
   component: string;
@@ -9,7 +11,19 @@ interface InstanceForm {
   doc: string;
   package: string;
   values: Record<string, string>;
+  /** requirement value ("usage.attribute") -> number */
+  requirements: Record<string, string>;
+  /** component-typed part -> instance that fills it (a material) */
+  parts: Record<string, string | null>;
   replace: string | null;
+}
+
+interface RequirementRow {
+  name: string;
+  /** qualified name of a library requirement def */
+  type: string;
+  /** attribute -> expression bound in the def (the others are left to each instance) */
+  values: Record<string, string>;
 }
 
 interface ComponentForm {
@@ -23,6 +37,7 @@ interface ComponentForm {
   ports: { name: string; type: string }[];
   /** a behavior's in parameters */
   params: { name: string; type: string }[];
+  requirements: RequirementRow[];
 }
 
 /** Component library: component types (#Component part defs), abstract
@@ -90,11 +105,11 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
     if (!target) return;
     const n = instances.filter((i) => i.component === target.qualifiedName).length + 1;
     setCompForm(null);
-    setForm({ component: target.qualifiedName, name: `${target.name[0].toLowerCase()}${target.name.slice(1)}${n}`, doc: "", package: "", values: {}, replace: null });
+    setForm({ component: target.qualifiedName, name: `${target.name[0].toLowerCase()}${target.name.slice(1)}${n}`, doc: "", package: "", values: {}, requirements: {}, parts: {}, replace: null });
   };
   const editInstance = (i: ComponentInstance) => {
     setCompForm(null);
-    setForm({ component: i.component, name: i.name, doc: i.doc || "", package: i.package || "", values: { ...i.ownValues }, replace: i.qualifiedName });
+    setForm({ component: i.component, name: i.name, doc: i.doc || "", package: i.package || "", values: { ...i.ownValues }, requirements: ownValues(i.requirementUsages), parts: { ...i.parts }, replace: i.qualifiedName });
   };
   const newComponent = (kind: "part" | "action") => {
     setForm(null);
@@ -103,7 +118,7 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
     const attributes = kind === "part" ? [{ name: "mass", type: "MassValue" }] : [{ name: "area", type: "Real" }];
     const params = kind === "part" ? [] : [{ name: "speed", type: "Real" }];
     const general = kind === "action" ? components.find((c) => c.kind === "action" && !c.specializes.some((g) => byQn.has(g))) : undefined;
-    setCompForm({ kind, name: "", package: pkg, specializes: general?.qualifiedName || "", abstract: kind === "action", doc: "", attributes, ports: [], params });
+    setCompForm({ kind, name: "", package: pkg, specializes: general?.qualifiedName || "", abstract: kind === "action", doc: "", attributes, ports: [], params, requirements: [] });
   };
 
   const run = async (fn: () => Promise<CatalogChange>, after?: (qn: string) => void) => {
@@ -120,7 +135,13 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
   const saveInstance = () =>
     form &&
     run(
-      () => api.saveInstance(projectId, { ...form, package: form.package || null, values: Object.fromEntries(Object.entries(form.values).filter(([, v]) => v.trim())) }),
+      () =>
+        api.saveInstance(projectId, {
+          ...form,
+          package: form.package || null,
+          values: Object.fromEntries(Object.entries(form.values).filter(([, v]) => v.trim())),
+          parts: Object.fromEntries(subParts(formComp!).map((p) => [p.name, form.parts[p.name] || null])),
+        }),
       () => setForm(null)
     );
   const deleteInstance = (i: ComponentInstance) => {
@@ -137,6 +158,7 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
           attributes: compForm.attributes.filter((a) => a.name.trim()),
           ports: compForm.kind === "part" ? compForm.ports.filter((p) => p.name.trim()) : [],
           params: compForm.kind === "action" ? compForm.params.filter((p) => p.name.trim()) : [],
+          requirements: compForm.requirements.filter((r) => r.name.trim() && r.type),
         }),
       (qn) => {
         setCompForm(null);
@@ -154,6 +176,8 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
     cands.sort((a, b) => Number(!a.startsWith(root + "::")) - Number(!b.startsWith(root + "::")) || a.split("::").length - b.split("::").length);
     return cands[0] || c.package || "";
   }
+  const templates = (catalog?.requirements || []).filter((r) => r.template || !r.subjectTypeId);
+  const reqMissing = form && formComp ? missingValues(formComp.requirementUsages, form.requirements) : [];
   const scope = form?.replace ? instances.find((i) => i.qualifiedName === form.replace)?.package || "" : formPkg;
   const instancePreview =
     form && formComp
@@ -161,7 +185,9 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
           `${formComp.kind} ${form.name || "…"} : ${ref(formComp.qualifiedName, scope)}`,
           fields(formComp)
             .filter((a) => form.values[a.name]?.trim())
-            .map((a) => `${formComp.params.includes(a) ? "in" : "attribute"} :>> ${a.name} = ${form.values[a.name].trim()};`),
+            .map((a) => `${formComp.params.includes(a) ? "in" : "attribute"} :>> ${a.name} = ${form.values[a.name].trim()};`)
+            .concat(subParts(formComp).filter((p) => form.parts[p.name]).map((p) => `part :>> ${p.name} :> ${ref(form.parts[p.name]!, scope)};`))
+            .concat(requirementLines(form.requirements, formComp.requirementUsages)),
           form.doc
         )
       : "";
@@ -174,6 +200,10 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
           ...(compForm.kind === "action" ? compForm.params : []).filter((p) => p.name.trim()).map((p) => `in ${p.name.trim()}${p.type.trim() ? ` : ${p.type.trim()}` : ""};`),
           ...compForm.attributes.filter((a) => a.name.trim()).map((a) => `attribute ${a.name.trim()}${a.type.trim() ? ` : ${a.type.trim()}` : ""};`),
           ...(compForm.kind === "part" ? compForm.ports : []).filter((p) => p.name.trim()).map((p) => `port ${p.name.trim()}${p.type.trim() ? ` : ${p.type.trim()}` : ""};`),
+          ...compForm.requirements.filter((r) => r.name.trim() && r.type).map((r) => {
+            const binds = Object.entries(r.values).filter(([, v]) => v.trim()).map(([a, v]) => `attribute :>> ${a} = ${v.trim()};`);
+            return `requirement ${r.name.trim()} : ${ref(r.type, compForm.package)}${binds.length ? ` { ${binds.join(" ")} }` : ";"}`;
+          }),
         ],
         compForm.doc
       ).replace(/;$/, " {\n}")
@@ -206,7 +236,7 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
           <div className="grid3">
             <label>
               {formComp?.kind === "action" ? "Behavior" : "Component"}
-              <select value={form.component} onChange={(e) => setForm({ ...form, component: e.target.value, values: {} })}>
+              <select value={form.component} onChange={(e) => setForm({ ...form, component: e.target.value, values: {}, requirements: {}, parts: {} })}>
                 {KINDS.map(([kind, label]) =>
                   concrete.some((c) => c.kind === kind) ? (
                     <optgroup key={kind} label={label}>
@@ -257,11 +287,38 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
                 );
               })}
           </div>
+          {formComp && subParts(formComp).length > 0 && (
+            <div className="params">
+              {subParts(formComp).map((p) => (
+                <label key={p.name}>
+                  <span>
+                    {p.name} <span className="mono">: {p.type}</span>
+                  </span>
+                  <select value={form.parts[p.name] || ""} onChange={(e) => setForm({ ...form, parts: { ...form.parts, [p.name]: e.target.value || null } })}>
+                    <option value="">— none —</option>
+                    {instances
+                      .filter((i) => p.candidates.includes(i.id))
+                      .map((i) => (
+                        <option key={i.id} value={i.qualifiedName}>
+                          {i.name}
+                        </option>
+                      ))}
+                  </select>
+                </label>
+              ))}
+            </div>
+          )}
+          {formComp && <RequirementValues usages={formComp.requirementUsages} values={form.requirements} onChange={(requirements) => setForm({ ...form, requirements })} />}
           <code className="block">{instancePreview}</code>
           <div className="row-end">
             <span className="hint">Values are SysML expressions; units go in brackets, e.g. 140 [SI::kg].</span>
             <button onClick={() => setForm(null)}>Cancel</button>
-            <button className="primary" disabled={busy || !NAME_RE.test(form.name)} onClick={saveInstance}>
+            <button
+              className="primary"
+              disabled={busy || !NAME_RE.test(form.name) || reqMissing.length > 0}
+              title={reqMissing.length ? `State the requirement values: ${reqMissing.join(", ")}` : undefined}
+              onClick={saveInstance}
+            >
               {busy ? "Saving…" : form.replace ? "Save instance" : "Add to catalog"}
             </button>
           </div>
@@ -312,6 +369,7 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
             <FeatureRows label={compForm.kind === "action" ? "Quantities (set by mission steps)" : "Attributes"} typeHint={compForm.kind === "action" ? "Real" : "MassValue"} rows={compForm.attributes} onChange={(attributes) => setCompForm({ ...compForm, attributes })} />
             {compForm.kind === "part" && <FeatureRows label="Ports" typeHint="~FuelPort" rows={compForm.ports} onChange={(ports) => setCompForm({ ...compForm, ports })} />}
           </div>
+          <RequirementRows templates={templates} rows={compForm.requirements} onChange={(requirements) => setCompForm({ ...compForm, requirements })} />
           <code className="block">{compPreview}</code>
           <div className="row-end">
             <button onClick={() => setCompForm(null)}>Cancel</button>
@@ -424,6 +482,11 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
               </div>
               )}
 
+              <UsageList comp={comp} />
+              {comp.analyses.length > 0 && shown.length > 0 && (
+                <ComponentAnalysisCard projectId={projectId} catalog={catalog} comp={comp} instances={shown} busy={busy} onChange={(fn) => run(fn)} onOpen={onOpen} />
+              )}
+
               <div className="section-title row-between">
                 <span>
                   Instances {comp.isAbstract && comp.kind === "part" && <span className="muted small">(of its specializations)</span>}
@@ -444,6 +507,89 @@ export function LibraryPanel({ projectId, catalog, loading, error, dirty, onChan
 }
 
 const TAG = { part: "Component", action: "Behavior" } as const;
+
+/** The requirement usages a component or behavior includes: what each binds, and what every instance states. */
+function UsageList({ comp }: { comp: Component }) {
+  const rows = walkUsages(comp.requirementUsages);
+  if (!rows.length) return null;
+  return (
+    <div>
+      <div className="section-title">Requirements</div>
+      <table className="table compact">
+        <tbody>
+          {rows.map((u) => {
+            const open = openThresholds(u);
+            return (
+              <tr key={u.path}>
+                <td className="mono" style={{ paddingLeft: 6 + (u.path.split(".").length - 1) * 14 }}>
+                  <ReqId id={reqId(u)} />
+                  {u.name} <span className="muted">: {u.defName}</span>
+                </td>
+                <td className="small">{fillDoc(u.doc, u.values)}</td>
+                <td className="small">
+                  {u.bound.map((b) => (
+                    <code key={b} className="nowrap">
+                      {b} = {u.values[b]}{" "}
+                    </code>
+                  ))}
+                  {open.length > 0 && <span className="muted">each instance sets {open.map((t) => t.name).join(", ")}</span>}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** Requirement usages of a new component: a library requirement def, and the attributes the component binds. */
+function RequirementRows({ templates, rows, onChange }: { templates: CatalogRequirement[]; rows: RequirementRow[]; onChange(rows: RequirementRow[]): void }) {
+  const set = (i: number, r: Partial<RequirementRow>) => onChange(rows.map((x, j) => (j === i ? { ...x, ...r } : x)));
+  if (!templates.length) return null;
+  return (
+    <div>
+      <div className="section-title row-between">
+        <span>Requirements <span className="muted small">(from the requirement library; each instance states the numbers left open)</span></span>
+        <button onClick={() => onChange([...rows, { name: "", type: templates[0].qualifiedName, values: {} }])}>+ Requirement</button>
+      </div>
+      {rows.map((r, i) => {
+        const def = templates.find((t) => t.qualifiedName === r.type);
+        return (
+          <div key={i} className="req-row">
+            <input className="mono" placeholder="name" value={r.name} onChange={(e) => set(i, { name: e.target.value })} />
+            <select value={r.type} onChange={(e) => set(i, { type: e.target.value, values: {} })}>
+              {templates.map((t) => (
+                <option key={t.qualifiedName} value={t.qualifiedName}>
+                  {t.shortId ? `${t.shortId} ${t.name}` : t.name}
+                </option>
+              ))}
+            </select>
+            {def?.thresholds
+              .filter((t) => !t.value)
+              .map((t) => (
+                <input key={t.name} className="mono" placeholder={`${t.name} = (each instance)`} title={`Bind ${t.name} to an expression of this component, or leave it for each instance to state`} value={r.values[t.name] || ""} onChange={(e) => set(i, { values: { ...r.values, [t.name]: e.target.value } })} />
+              ))}
+            <button className="link" onClick={() => onChange(rows.filter((_, j) => j !== i))}>
+              ✕
+            </button>
+            {def?.doc && <div className="muted small req-row-doc">{def.doc}</div>}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/** parts of a component that a catalog instance fills (a material) */
+const subParts = (c: Component) => c.parts.filter((p) => p.candidates.length > 0);
+
+/** a value as the instance table shows it: a long sequence as its count */
+function shortValue(v: string | undefined): string {
+  if (v === undefined) return "—";
+  const m = /^\((.*)\)$/.exec(v.trim());
+  return m && v.length > 24 ? `(${m[1].split(",").length} values)` : v;
+}
 
 /** what an instance form sets: a behavior's parameters, a component's attributes */
 const fields = (c: Component) => (c.kind === "action" ? c.params : c.attributes);
@@ -512,6 +658,8 @@ function InstanceTable({
     return names;
   }, [comp, rows]);
   const mixed = rows.some((r) => r.component !== comp.qualifiedName);
+  const hasReqs = rows.some((r) => r.requirementUsages.length > 0);
+  const parts = subParts(comp);
   if (!rows.length) return <div className="muted small">No instances yet.</div>;
   return (
     <div className="table-scroll">
@@ -525,6 +673,12 @@ function InstanceTable({
                 {c}
               </th>
             ))}
+            {parts.map((p) => (
+              <th key={p.name} className="mono">
+                {p.name}
+              </th>
+            ))}
+            {hasReqs && <th title="The numbers each instance states in its requirements">Requirements</th>}
             <th />
           </tr>
         </thead>
@@ -538,10 +692,25 @@ function InstanceTable({
               </td>
               {mixed && <td className="small">{short(r.component)}</td>}
               {cols.map((c) => (
-                <td key={c} className={`mono small${r.ownValues[c] ? "" : " muted"}`}>
-                  {r.values[c] ?? "—"}
+                <td key={c} className={`mono small${r.ownValues[c] ? "" : " muted"}`} title={r.values[c]}>
+                  {shortValue(r.values[c])}
                 </td>
               ))}
+              {parts.map((p) => (
+                <td key={p.name} className="mono small">
+                  {short(r.parts?.[p.name]) || "—"}
+                </td>
+              ))}
+              {hasReqs && (
+                <td className="mono small">
+                  {Object.entries(ownValues(r.requirementUsages)).map(([k, v]) => (
+                    <div key={k} className="nowrap">
+                      {k} = {v}
+                    </div>
+                  ))}
+                  {r.missingRequirementValues.length > 0 && <span className="pill warn">unset: {r.missingRequirementValues.join(", ")}</span>}
+                </td>
+              )}
               <td className="actions">
                 <button className="link" onClick={() => onOpen(r)}>
                   Source

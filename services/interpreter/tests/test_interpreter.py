@@ -198,3 +198,30 @@ def test_verification_objective_verifies_requirement_defs():
     r = client.post("/parse", json={"files": [{"name": "V.sysml", "text": src}]}).json()
     assert not [d for d in r["diagnostics"] if d["severity"] == "error"]
     assert [(e["source"], e["target"]) for e in r["graph"]["edges"] if e["kind"] == "verify"] == [("V__Sim", "V__EnergyReq")]
+
+
+def test_verification_objective_verifies_requirement_usage_through_subject():
+    src = """package V {
+        private import ScalarValues::*;
+        abstract requirement def Min { attribute actual : Real; attribute minimum : Real; require constraint { actual >= minimum } }
+        part def Battery { attribute energy : Real; requirement cap : Min { attribute :>> actual = energy; } }
+        verification def Bench {
+            subject battery : Battery;
+            objective { verify battery.cap; }
+        }
+    }"""
+    r = client.post("/parse", json={"files": [{"name": "V.sysml", "text": src}]}).json()
+    assert not [d for d in r["diagnostics"] if d["severity"] == "error"]
+    # the chain battery.cap ends at the requirement usage the test verifies
+    assert [(e["source"], e["target"]) for e in r["graph"]["edges"] if e["kind"] == "verify"] == [("V__Bench", "V__Battery__cap")]
+
+
+def test_short_names_are_ids_on_nodes():
+    src = """package V {
+        private import ScalarValues::*;
+        abstract requirement def <'LIB-1'> Min { attribute minimum : Real; }
+        part def Battery { requirement <'BAT-1'> cap : Min; }
+    }"""
+    r = client.post("/parse", json={"files": [{"name": "V.sysml", "text": src}]}).json()
+    ids = {n["id"]: n.get("shortName") for n in r["graph"]["nodes"]}
+    assert ids["V__Min"] == "LIB-1" and ids["V__Battery__cap"] == "BAT-1"

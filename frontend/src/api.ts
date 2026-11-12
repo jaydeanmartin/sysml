@@ -2,6 +2,7 @@ import type {
   Analysis,
   Catalog,
   CatalogChange,
+  ComponentAnalysisResult,
   ComponentRequest,
   ConfigurationRequest,
   InstanceRequest,
@@ -17,6 +18,7 @@ import type {
   Preview,
   Project,
   Requirement,
+  RequirementTree,
   Run,
   RunRequest,
   Version,
@@ -86,8 +88,14 @@ export const api = {
     call<CatalogChange>(`${M}/projects/${projectId}/catalog/missions`, { method: "POST", json: req }),
   simulateMission: (projectId: string, req: SimulationRequest) =>
     call<SimulationResult>(`${M}/projects/${projectId}/catalog/missions/simulate`, { method: "POST", json: req }),
-  evaluateMissions: (projectId: string, missionType: string, draft: StepRequest[] | null) =>
-    call<MissionEvaluation>(`${M}/projects/${projectId}/catalog/missions/evaluate`, { method: "POST", json: { missionType, draft } }),
+  evaluateMissions: (projectId: string, missionType: string, draft: StepRequest[] | null, draftRequirements?: Record<string, string> | null) =>
+    call<MissionEvaluation>(`${M}/projects/${projectId}/catalog/missions/evaluate`, { method: "POST", json: { missionType, draft, draftRequirements } }),
+  analyzeComponent: (projectId: string, instance: string, analysis?: string | null) =>
+    call<ComponentAnalysisResult>(`${M}/projects/${projectId}/catalog/components/analyze`, { method: "POST", json: { instance, analysis } }),
+  requirementTree: (projectId: string, system: string) =>
+    call<RequirementTree>(`${M}/projects/${projectId}/catalog/requirement-tree?system=${encodeURIComponent(system)}`),
+  checkRequirementTree: (projectId: string, system: string, missions = true) =>
+    call<RequirementTree>(`${M}/projects/${projectId}/catalog/requirement-tree/check`, { method: "POST", json: { system, missions } }),
   deleteCatalogElement: (projectId: string, qualifiedName: string) =>
     call<CatalogChange>(`${M}/projects/${projectId}/catalog/elements?qualifiedName=${encodeURIComponent(qualifiedName)}`, {
       method: "DELETE",

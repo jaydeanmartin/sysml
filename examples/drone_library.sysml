@@ -1,6 +1,7 @@
 package DroneLibrary {
     private import ScalarValues::*;
     private import ISQ::*;
+    private import AnalysisTooling::*;
 
     // ---------------------------------------------------------- markers
     // The Library and Configurator tabs look for these metadata tags.
@@ -12,6 +13,28 @@ package DroneLibrary {
     }
     metadata def Behavior {
         doc /* An abstract behavior: its in parameters are set by the system that performs it, its quantities by each mission step. */
+    }
+
+    // ---------------------------------------------------------- requirement library
+    // Abstract requirements, reused by components, architectures, behaviors and
+    // missions. A def includes one as a requirement usage and binds what it
+    // constrains (`actual`); every instance then states its own number (the
+    // minimum or maximum), so instances cannot leave a requirement open:
+    //     requirement <'BAT-01'> specificEnergy : MinimumValue { attribute :>> actual = energy / (mass / (1 [SI::kg])); }
+    //     part lipo4s5000 : Battery { ... requirement <'BAT-01'> specificEnergy :>> specificEnergy { attribute :>> minimum = 130; } }
+    // Requirement ids are short names (<'BAT-01'>). A redefinition restates the
+    // id: OpenSysML finds a feature that has a short name only by it.
+    abstract requirement def <'LIB-01'> MinimumValue {
+        doc /* The value shall be at least {minimum}. */
+        attribute actual : Real;
+        attribute minimum : Real;
+        require constraint { actual >= minimum }
+    }
+    abstract requirement def <'LIB-02'> MaximumValue {
+        doc /* The value shall not exceed {maximum}. */
+        attribute actual : Real;
+        attribute maximum : Real;
+        require constraint { actual <= maximum }
     }
 
     // ---------------------------------------------------------- interfaces
@@ -28,6 +51,16 @@ package DroneLibrary {
     }
 
     // ---------------------------------------------------------- component types
+    #Component part def Material {
+        doc /* Structural material. Laminates: in-plane values, along the fibres for a tube. */
+        attribute density : Real;           // kg/m³
+        attribute youngsModulus : Real;     // GPa
+        attribute shearModulus : Real;      // GPa
+        attribute poissonRatio : Real;
+        attribute strength : Real;          // MPa: yield, or tensile strength of a brittle laminate
+        attribute fatigueStrength : Real;   // MPa, at 10⁷ cycles
+    }
+
     #Component part def Frame {
         doc /* Airframe: a central hub and one arm per rotor. The wheelbase is the motor-to-motor diagonal. */
         attribute hubMass : MassValue;
@@ -35,6 +68,13 @@ package DroneLibrary {
         attribute wheelbase : Real;         // mm
         attribute maxTakeoffMass : MassValue;
         attribute dragArea : Real;          // m², drag coefficient × frontal area (dynamic simulation)
+        // structural geometry (structural analysis): round tube arms between two hub plates
+        attribute armOuterDiameter : Real;  // mm
+        attribute armWallThickness : Real;  // mm
+        attribute hubDiameter : Real;       // mm, the plates' diameter; the arms run from its edge to the motors
+        attribute hubPlateThickness : Real; // mm, each of the two plates
+        part armMaterial : Material;
+        part plateMaterial : Material;
         port payloadMount : MountPort;
     }
 
@@ -45,6 +85,11 @@ package DroneLibrary {
         attribute energy : Real;            // Wh
         attribute maxPower : Real;          // W (continuous discharge)
         port powerOut : PowerPort;
+        // each pack states the specific energy (Wh/kg) its datasheet guarantees
+        requirement <'BAT-01'> specificEnergy : MinimumValue {
+            doc /* The pack shall store at least {minimum} Wh per kg, harness included. */
+            attribute :>> actual = energy / (mass / (1 [SI::kg]));
+        }
     }
 
     #Component part def Motor {
@@ -71,13 +116,22 @@ package DroneLibrary {
         attribute thrustPerWatt : Real;     // N per W of shaft power, at hover
         // performance curves against the advance ratio J = V / (n D) (dynamic simulation):
         // thrust coefficient CT = ct0 + ct1 J + ct2 J², power coefficient CP = cp0 + cp1 J + cp2 J²;
-        // torque coefficient CQ = CP / 2π, efficiency η = J CT / CP
+        // torque coefficient CQ = CP / 2π, efficiency η = J CT / CP.
+        // Estimated from the blade geometry by the PropellerAerodynamics analysis.
         attribute ct0 : Real;
         attribute ct1 : Real;
         attribute ct2 : Real;
         attribute cp0 : Real;
         attribute cp1 : Real;
         attribute cp2 : Real;
+        // blade geometry (aerodynamic and structural analysis): stations from hub to tip
+        attribute bladeCount : Integer;
+        attribute stations : Real[*] ordered nonunique;       // r/R of each station
+        attribute chord : Real[*] ordered nonunique;          // chord / tip radius at each station
+        attribute twist : Real[*] ordered nonunique;          // deg, chord line to the rotation plane at each station
+        attribute airfoil : String;         // section, as XFOIL names it: "NACA 4412"
+        attribute hubRadius : Real;         // r/R where the blade starts
+        part material : Material;
         port hub : ~ShaftPort;
     }
 
@@ -100,6 +154,44 @@ package DroneLibrary {
     // Component instances: each one is a part usage that fixes the attribute
     // values of its component type. The Library tab creates and edits them.
     package Catalog {
+        // ------------------------------------------ materials (typical values)
+        part nylonGF30 : Material {
+            doc /* 30 % glass-filled nylon: injection-moulded propellers */
+            attribute :>> density = 1360;
+            attribute :>> youngsModulus = 7.5;
+            attribute :>> shearModulus = 2.7;
+            attribute :>> poissonRatio = 0.35;
+            attribute :>> strength = 150;
+            attribute :>> fatigueStrength = 45;
+        }
+        part cfrpWoven : Material {
+            doc /* Woven carbon/epoxy laminate, quasi-isotropic: frame plates, moulded propellers */
+            attribute :>> density = 1550;
+            attribute :>> youngsModulus = 50;
+            attribute :>> shearModulus = 19;
+            attribute :>> poissonRatio = 0.3;
+            attribute :>> strength = 550;
+            attribute :>> fatigueStrength = 220;
+        }
+        part cfrpTube : Material {
+            doc /* Roll-wrapped carbon tube, fibres mostly along the axis: frame arms */
+            attribute :>> density = 1580;
+            attribute :>> youngsModulus = 110;
+            attribute :>> shearModulus = 5;
+            attribute :>> poissonRatio = 0.3;
+            attribute :>> strength = 1200;
+            attribute :>> fatigueStrength = 450;
+        }
+        part al6061 : Material {
+            doc /* 6061-T6 aluminium: motor mounts, folding-arm hinges */
+            attribute :>> density = 2700;
+            attribute :>> youngsModulus = 69;
+            attribute :>> shearModulus = 26;
+            attribute :>> poissonRatio = 0.33;
+            attribute :>> strength = 276;
+            attribute :>> fatigueStrength = 96;
+        }
+
         // ------------------------------------------ structures (frame sizes)
         part frame450 : Frame {
             doc /* 450 mm carbon frame, small parcels */
@@ -108,6 +200,12 @@ package DroneLibrary {
             attribute :>> wheelbase = 450;
             attribute :>> dragArea = 0.03;
             attribute :>> maxTakeoffMass = 5 [SI::kg];
+            attribute :>> armOuterDiameter = 16;
+            attribute :>> armWallThickness = 1;
+            attribute :>> hubDiameter = 160;
+            attribute :>> hubPlateThickness = 2;
+            part :>> armMaterial :> cfrpTube;
+            part :>> plateMaterial :> cfrpWoven;
         }
         part frame700 : Frame {
             doc /* 700 mm carbon frame */
@@ -116,6 +214,12 @@ package DroneLibrary {
             attribute :>> wheelbase = 700;
             attribute :>> dragArea = 0.05;
             attribute :>> maxTakeoffMass = 12 [SI::kg];
+            attribute :>> armOuterDiameter = 22;
+            attribute :>> armWallThickness = 1.5;
+            attribute :>> hubDiameter = 220;
+            attribute :>> hubPlateThickness = 3;
+            part :>> armMaterial :> cfrpTube;
+            part :>> plateMaterial :> cfrpWoven;
         }
         part frame1200 : Frame {
             doc /* 1200 mm folding frame */
@@ -124,6 +228,12 @@ package DroneLibrary {
             attribute :>> wheelbase = 1200;
             attribute :>> dragArea = 0.12;
             attribute :>> maxTakeoffMass = 22 [SI::kg];
+            attribute :>> armOuterDiameter = 30;
+            attribute :>> armWallThickness = 1.5;
+            attribute :>> hubDiameter = 300;
+            attribute :>> hubPlateThickness = 3;
+            part :>> armMaterial :> cfrpTube;
+            part :>> plateMaterial :> cfrpWoven;
         }
         part frame1600 : Frame {
             doc /* 1600 mm heavy-lift frame */
@@ -132,6 +242,12 @@ package DroneLibrary {
             attribute :>> wheelbase = 1600;
             attribute :>> dragArea = 0.2;
             attribute :>> maxTakeoffMass = 35 [SI::kg];
+            attribute :>> armOuterDiameter = 40;
+            attribute :>> armWallThickness = 2;
+            attribute :>> hubDiameter = 400;
+            attribute :>> hubPlateThickness = 4;
+            part :>> armMaterial :> cfrpTube;
+            part :>> plateMaterial :> cfrpWoven;
         }
 
         // ------------------------------------------ batteries
@@ -141,6 +257,7 @@ package DroneLibrary {
             attribute :>> voltage = 14.8;
             attribute :>> energy = 74;
             attribute :>> maxPower = 2200;
+            requirement <'BAT-01'> specificEnergy :>> specificEnergy { attribute :>> minimum = 130; }
         }
         part lipo4s8000 : Battery {
             doc /* 4S 8000 mAh LiPo */
@@ -148,6 +265,7 @@ package DroneLibrary {
             attribute :>> voltage = 14.8;
             attribute :>> energy = 118;
             attribute :>> maxPower = 2400;
+            requirement <'BAT-01'> specificEnergy :>> specificEnergy { attribute :>> minimum = 140; }
         }
         part lipo6s10000 : Battery {
             doc /* 6S 10000 mAh LiPo */
@@ -155,6 +273,7 @@ package DroneLibrary {
             attribute :>> voltage = 22.2;
             attribute :>> energy = 222;
             attribute :>> maxPower = 5000;
+            requirement <'BAT-01'> specificEnergy :>> specificEnergy { attribute :>> minimum = 160; }
         }
         part lipo6s22000 : Battery {
             doc /* 6S 22000 mAh LiPo */
@@ -162,6 +281,7 @@ package DroneLibrary {
             attribute :>> voltage = 22.2;
             attribute :>> energy = 488;
             attribute :>> maxPower = 10000;
+            requirement <'BAT-01'> specificEnergy :>> specificEnergy { attribute :>> minimum = 175; }
         }
         part liion6s30000 : Battery {
             doc /* 6S 30000 mAh Li-ion: more energy per kg, much less power */
@@ -169,6 +289,7 @@ package DroneLibrary {
             attribute :>> voltage = 21.6;
             attribute :>> energy = 666;
             attribute :>> maxPower = 3000;
+            requirement <'BAT-01'> specificEnergy :>> specificEnergy { attribute :>> minimum = 220; }
         }
         part lipo12s22000 : Battery {
             doc /* Two 6S 22000 mAh LiPo packs in series */
@@ -176,6 +297,7 @@ package DroneLibrary {
             attribute :>> voltage = 44.4;
             attribute :>> energy = 977;
             attribute :>> maxPower = 20000;
+            requirement <'BAT-01'> specificEnergy :>> specificEnergy { attribute :>> minimum = 180; }
         }
 
         // ------------------------------------------ motors
@@ -236,6 +358,13 @@ package DroneLibrary {
             attribute :>> cp0 = 0.045;
             attribute :>> cp1 = 0;
             attribute :>> cp2 = -0.06;
+            attribute :>> bladeCount = 2;
+            attribute :>> stations = (0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1);
+            attribute :>> chord = (0.12, 0.15, 0.16, 0.155, 0.145, 0.13, 0.115, 0.095, 0.07, 0.05);
+            attribute :>> twist = (43.7, 29.8, 22.3, 17.7, 14.6, 12.4, 10.8, 9.6, 8.6, 8.2);   // constant 4.5 in geometric pitch
+            attribute :>> airfoil = "NACA 4412";
+            attribute :>> hubRadius = 0.12;
+            part :>> material :> nylonGF30;
         }
         part prop15x5 : Propeller {
             attribute :>> mass = 0.035 [SI::kg];
@@ -248,6 +377,13 @@ package DroneLibrary {
             attribute :>> cp0 = 0.036;
             attribute :>> cp1 = 0;
             attribute :>> cp2 = -0.07;
+            attribute :>> bladeCount = 2;
+            attribute :>> stations = (0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1);
+            attribute :>> chord = (0.12, 0.15, 0.16, 0.155, 0.145, 0.13, 0.115, 0.095, 0.07, 0.05);
+            attribute :>> twist = (35.3, 23, 16.9, 13.3, 10.9, 9.3, 8.1, 7.1, 6.4, 6.1);   // constant 5 in geometric pitch
+            attribute :>> airfoil = "NACA 4412";
+            attribute :>> hubRadius = 0.12;
+            part :>> material :> nylonGF30;
         }
         part prop22x7 : Propeller {
             doc /* Carbon fibre */
@@ -261,6 +397,13 @@ package DroneLibrary {
             attribute :>> cp0 = 0.032;
             attribute :>> cp1 = 0;
             attribute :>> cp2 = -0.07;
+            attribute :>> bladeCount = 2;
+            attribute :>> stations = (0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1);
+            attribute :>> chord = (0.1, 0.12, 0.125, 0.12, 0.11, 0.1, 0.09, 0.075, 0.06, 0.04);
+            attribute :>> twist = (34, 22.1, 16.1, 12.7, 10.4, 8.9, 7.7, 6.8, 6.1, 5.8);   // constant 7 in geometric pitch
+            attribute :>> airfoil = "NACA 4410";
+            attribute :>> hubRadius = 0.12;
+            part :>> material :> cfrpWoven;
         }
         part prop28x9 : Propeller {
             doc /* Carbon fibre */
@@ -274,6 +417,13 @@ package DroneLibrary {
             attribute :>> cp0 = 0.031;
             attribute :>> cp1 = 0;
             attribute :>> cp2 = -0.065;
+            attribute :>> bladeCount = 2;
+            attribute :>> stations = (0.15, 0.25, 0.35, 0.45, 0.55, 0.65, 0.75, 0.85, 0.95, 1);
+            attribute :>> chord = (0.1, 0.12, 0.125, 0.12, 0.11, 0.1, 0.09, 0.075, 0.06, 0.04);
+            attribute :>> twist = (34.3, 22.3, 16.3, 12.8, 10.5, 8.9, 7.8, 6.9, 6.1, 5.8);   // constant 9 in geometric pitch
+            attribute :>> airfoil = "NACA 4410";
+            attribute :>> hubRadius = 0.12;
+            part :>> material :> cfrpWoven;
         }
 
         // ------------------------------------------ payload capacities
@@ -338,6 +488,11 @@ package DroneLibrary {
         attribute :>> distance;
         attribute :>> duration = distance / speed;
         attribute :>> groundSpeed = speed;
+        // each cruise profile states the speed it is cleared to fly at
+        requirement <'CRZ-01'> speedLimit : MaximumValue {
+            doc /* The cruise speed shall not exceed the cleared {maximum} m/s. */
+            attribute :>> actual = speed;
+        }
     }
     abstract #Behavior action def Hover :> DroneBehavior {
         doc /* Hold position, e.g. waiting for a landing zone to clear. */
@@ -366,6 +521,49 @@ package DroneLibrary {
         attribute :>> airborne = false;
     }
 
+    // ---------------------------------------------------------- component analyses
+    // An analysis bound to an external tool, with a component as its subject:
+    // the Library runs it for a catalog instance. Its in parameters are
+    // evaluated with the instance as subject; out parameters named like an
+    // attribute of the component (ct0 … cp2, thrustPerWatt) can be written back.
+    analysis def PropellerAerodynamics {
+        doc /* XFOIL polars of the blade sections at their Reynolds and Mach numbers, and a blade-element momentum model with tip and hub losses: thrust and power coefficients against advance ratio, fitted as the CT, CP quadratics the dynamic simulation uses. */
+        metadata ToolExecution { toolName = "propellerAero"; uri = "analysis://propellerAero"; }
+        subject prop : Propeller;
+        in diameter : Real = prop.diameter;             // in
+        in bladeCount : Real = prop.bladeCount;
+        in stations : Real[*] ordered nonunique = prop.stations;
+        in chord : Real[*] ordered nonunique = prop.chord;
+        in twist : Real[*] ordered nonunique = prop.twist;
+        in airfoil : String = prop.airfoil;
+        in hubRadius : Real = prop.hubRadius;
+        in tipSpeed : Real = 110;                       // m/s: the speed the section polars are computed at (hover)
+        in airDensity : Real = 1.225;                   // kg/m³
+        in ncrit : Real = 9;                            // XFOIL transition amplification: 9 for quiet air
+        out ct0 : Real;
+        out ct1 : Real;
+        out ct2 : Real;
+        out cp0 : Real;
+        out cp1 : Real;
+        out cp2 : Real;
+        out thrustPerWatt : Real;                       // N/W, static, at the reference speed
+        out figureOfMerit : Real;
+    }
+
+    // ---------------------------------------------------------- tests
+    // A verification def is a test: its objective names the requirements it
+    // verifies, here a requirement usage reached through the subject.
+    verification def BatteryAcceptanceTest {
+        doc /* Incoming inspection: each pack is weighed and its capacity measured on a discharge bench. */
+        subject battery : Battery;
+        objective { verify battery.specificEnergy; }
+    }
+    verification def CruiseClearanceReview {
+        doc /* Flight-envelope review of each cruise profile against the speed it is cleared for. */
+        subject cruise : Cruise;
+        objective { verify cruise.speedLimit; }
+    }
+
     // ---------------------------------------------------------- behavior catalog
     // Performance profiles: every parameter set, so a system instance can perform them.
     package Behaviors {
@@ -375,12 +573,25 @@ package DroneLibrary {
             in :>> powerFactor = 1.3;
             in :>> climbRate = 2;
         }
-        action cruise10 : Cruise { in :>> powerFactor = 1.05; in :>> speed = 10; }
-        action cruise12 : Cruise { in :>> powerFactor = 1.1; in :>> speed = 12; }
-        action cruise15 : Cruise { in :>> powerFactor = 1.2; in :>> speed = 15; }
+        action cruise10 : Cruise {
+            in :>> powerFactor = 1.05;
+            in :>> speed = 10;
+            requirement <'CRZ-01'> speedLimit :>> speedLimit { attribute :>> maximum = 12; }
+        }
+        action cruise12 : Cruise {
+            in :>> powerFactor = 1.1;
+            in :>> speed = 12;
+            requirement <'CRZ-01'> speedLimit :>> speedLimit { attribute :>> maximum = 14; }
+        }
+        action cruise15 : Cruise {
+            in :>> powerFactor = 1.2;
+            in :>> speed = 15;
+            requirement <'CRZ-01'> speedLimit :>> speedLimit { attribute :>> maximum = 15; }
+        }
         action cruiseSport : Cruise {
             doc /* Speed profile still being flight-tested: no power factor yet */
             in :>> speed = 18;
+            requirement <'CRZ-01'> speedLimit :>> speedLimit { attribute :>> maximum = 16; }
         }
         action holdPosition : Hover { in :>> powerFactor = 1.0; }
         action winch1 : WinchLower { in :>> powerFactor = 1.05; in :>> winchSpeed = 1; }

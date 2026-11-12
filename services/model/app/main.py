@@ -21,6 +21,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
 
+import json
+
 import httpx
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -575,6 +577,7 @@ def requirements(model_id: str) -> list[dict[str, Any]]:
                 "id": n["id"],
                 "kind": n["kind"],
                 "name": n["name"],
+                "shortName": n.get("shortName"),
                 "qualifiedName": n["qualifiedName"],
                 "doc": n.get("doc"),
                 "constraints": n.get("constraints") or [],
@@ -665,6 +668,12 @@ class FeatureIn(BaseModel):
     type: str = ""
 
 
+class RequirementUsageIn(BaseModel):
+    name: str
+    type: str = Field(description="qualified name of the (library) requirement def")
+    values: dict[str, str] = Field(default={}, description="attribute -> expression bound in the def, e.g. {'actual': 'energy'}; the others are set by each instance")
+
+
 class ComponentIn(BaseModel):
     name: str
     package: str = Field(description="qualified name of the package to declare the component in")
@@ -675,6 +684,7 @@ class ComponentIn(BaseModel):
     attributes: list[FeatureIn] = []
     ports: list[FeatureIn] = []
     params: list[FeatureIn] = Field(default=[], description="a behavior's in parameters, set by the system that performs it")
+    requirements: list[RequirementUsageIn] = Field(default=[], description="requirement usages, typed by requirement defs of a library")
 
 
 class InstanceIn(BaseModel):
@@ -684,6 +694,14 @@ class InstanceIn(BaseModel):
     values: dict[str, str] = Field(default={}, description="attribute or parameter name -> SysML expression, e.g. '140 [SI::kg]'")
     package: str | None = Field(None, description="default: the Catalog (Behaviors) package next to the component (behavior)")
     replace: str | None = Field(None, description="qualified name of an existing instance to rewrite")
+    parts: dict[str, str | None] | None = Field(
+        None, description="component-typed part -> qualified name of the instance that fills it, e.g. {'material': 'Lib::Catalog::cfrpWoven'}; "
+        "omitted on a rewrite: keep the current ones",
+    )
+    requirements: dict[str, str] | None = Field(
+        None, description="requirement value -> number, as 'usage.attribute' (nested: 'usage.sub.attribute'), e.g. {'endurance.minimum': '15'}; "
+        "every value the requirement usages leave unset is required. Omitted on a rewrite: keep the current ones",
+    )
 
 
 class ConfigurationIn(BaseModel):
@@ -694,6 +712,10 @@ class ConfigurationIn(BaseModel):
     behaviors: dict[str, str | None] = Field(default={}, description="behavior slot -> qualified name of a complete behavior instance; every slot is required")
     package: str | None = Field(None, description="default: the Configurations package next to the architecture")
     replace: str | None = Field(None, description="qualified name of an existing system instance to rewrite")
+    requirements: dict[str, str] | None = Field(
+        None, description="requirement value -> number, as 'usage.attribute' (nested: 'usage.sub.attribute'), e.g. {'endurance.minimum': '15'}; "
+        "every value the requirement usages leave unset is required. Omitted on a rewrite: keep the current ones",
+    )
 
 
 class StepIn(BaseModel):
@@ -708,11 +730,16 @@ class MissionIn(BaseModel):
     steps: list[StepIn] = Field(default=[], description="the steps, in the order they are performed")
     package: str | None = Field(None, description="default: the Missions package next to the mission type")
     replace: str | None = Field(None, description="qualified name of an existing mission to rewrite")
+    requirements: dict[str, str] | None = Field(
+        None, description="requirement value -> number, as 'usage.attribute' (nested: 'usage.sub.attribute'), e.g. {'endurance.minimum': '15'}; "
+        "every value the requirement usages leave unset is required. Omitted on a rewrite: keep the current ones",
+    )
 
 
 class MissionCheckIn(BaseModel):
     missionType: str
     draft: list[StepIn] | None = Field(None, description="steps of an unsaved mission to check as well (key 'draft')")
+    draftRequirements: dict[str, str] | None = Field(None, description="the draft's requirement values, as for a saved mission")
 
 
 def _project_heads(project_id: uuid.UUID) -> list[dict[str, Any]]:
@@ -801,6 +828,24 @@ def _place(cat: dict[str, Any], sources: dict[str, str], name: str, package: str
     return model_id, package, lambda block: catalog.insert_member(sources[model_id], pkg["loc"], block)
 
 
+def _requirement_values(what: str, usages: list[dict[str, Any]], given: dict[str, str] | None, replace: dict[str, Any] | None) -> dict[str, str]:
+    """The requirement values an instance writes: those given (or, when none are
+    given for a rewrite, its current ones). Refused when one is not a value of
+    the def's requirement usages, or a value they leave unset is missing:
+    an instance states the actual numbers of its requirements."""
+    if given is None:
+        given = catalog.own_requirement_values(replace["requirementUsages"]) if replace else {}
+    given = {k: v.strip() for k, v in given.items() if (v or "").strip()}
+    known = {f"{u['path']}.{t['name']}" for u in catalog.walk_usages(usages) for t in u["thresholds"]}
+    unknown = sorted(set(given) - known)
+    if unknown:
+        raise HTTPException(422, f"{what} has no requirement value {', '.join(unknown)}")
+    missing = [k for k in catalog.missing_values(usages) if k not in given]
+    if missing:
+        raise HTTPException(422, f"{what} must state its requirements: set {', '.join(missing)}")
+    return given
+
+
 @app.get("/projects/{project_id}/catalog")
 def get_catalog(project_id: uuid.UUID) -> dict[str, Any]:
     """Component types, their instances, system architectures (with slots and the
@@ -827,6 +872,7 @@ def create_component(project_id: uuid.UUID, body: ComponentIn) -> dict[str, Any]
             body.name, catalog.ref(tag, pkg_qn), body.specializes, [f.model_dump() for f in body.attributes],
             [f.model_dump() for f in body.ports], body.doc, body.abstract, body.kind,
             [f.model_dump() for f in body.params], [p["name"] for p in general["params"]] if general else [],
+            [{**r.model_dump(), "type": catalog.ref(_find(cat["requirements"], r.type, "requirement def")["qualifiedName"], pkg_qn)} for r in body.requirements if r.name.strip()],
         )
         source = apply(block)
     except catalog.CatalogError as exc:
@@ -846,10 +892,25 @@ def save_instance(project_id: uuid.UUID, body: InstanceIn) -> dict[str, Any]:
     if unknown:
         raise HTTPException(422, f"{comp['name']} has no attribute {', '.join(sorted(unknown))}")
     replace = _find(cat["instances"], body.replace, "instance") if body.replace else None
+    reqs = _requirement_values(body.name, comp["requirementUsages"], body.requirements, replace)
+    sub_parts = {p["name"]: p for p in comp["parts"] if p["candidates"] or p["name"] in (replace or {}).get("parts", {})}
+    given_parts = body.parts if body.parts is not None else ((replace or {}).get("parts") or {})
+    inst_by_qn = {i["qualifiedName"]: i for i in cat["instances"]}
+    for part, inst_qn in given_parts.items():
+        if part not in sub_parts:
+            raise HTTPException(422, f"{comp['name']} has no part '{part}' a catalog instance can fill")
+        if inst_qn and inst_qn not in inst_by_qn:
+            raise HTTPException(404, f"instance '{inst_qn}' not found")
+        if inst_qn and inst_by_qn[inst_qn]["id"] not in sub_parts[part]["candidates"]:
+            raise HTTPException(422, f"'{short_name(inst_qn)}' does not fit {part} : {sub_parts[part]['type']}")
     package = body.package or _default_package(cat, comp, "Catalog" if comp["kind"] == "part" else "Behaviors")
     model_id, pkg_qn, apply = _place(cat, sources, body.name, package, replace)
     try:
-        block = catalog.instance_text(body.name, catalog.ref(comp["qualifiedName"], pkg_qn), body.values, body.doc, comp["kind"], params)
+        block = catalog.instance_text(
+            body.name, catalog.ref(comp["qualifiedName"], pkg_qn), body.values, body.doc, comp["kind"], params, reqs,
+            catalog.declared_ids(comp["requirementUsages"]),
+            {p: catalog.ref(q, pkg_qn) for p, q in given_parts.items() if q},
+        )
         source = apply(block)
     except catalog.CatalogError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -892,12 +953,15 @@ def save_configuration(project_id: uuid.UUID, body: ConfigurationIn) -> dict[str
         if inst["id"] not in performs[slot]["candidates"]:
             raise HTTPException(422, f"'{inst['name']}' is a {inst['component']}, which does not fit {slot} : {performs[slot]['type']}")
     replace = _find(cat["configurations"], body.replace, "system instance") if body.replace else None
+    reqs = _requirement_values(body.name, arch["requirementUsages"], body.requirements, replace)
     package = body.package or _default_package(cat, arch, "Configurations")
     model_id, pkg_qn, apply = _place(cat, sources, body.name, package, replace)
     ordered = {s: catalog.ref(body.assignments[s], pkg_qn) for s in slots if body.assignments.get(s)}
     behaviors = {b: catalog.ref(body.behaviors[b], pkg_qn) for b in performs}
     try:
-        block = catalog.configuration_text(body.name, catalog.ref(arch["qualifiedName"], pkg_qn), ordered, body.doc, behaviors)
+        block = catalog.configuration_text(
+            body.name, catalog.ref(arch["qualifiedName"], pkg_qn), ordered, body.doc, behaviors, reqs, catalog.declared_ids(arch["requirementUsages"]),
+        )
         source = apply(block)
     except catalog.CatalogError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -914,12 +978,13 @@ def save_mission(project_id: uuid.UUID, body: MissionIn) -> dict[str, Any]:
     mtype = _find(cat["missionTypes"], body.missionType, "mission type")
     _check_steps(cat, body.steps)
     replace = _find(cat["missions"], body.replace, "mission") if body.replace else None
+    reqs = _requirement_values(body.name, mtype["requirementUsages"], body.requirements, replace)
     package = body.package or _default_package(cat, mtype, "Missions")
     model_id, pkg_qn, apply = _place(cat, sources, body.name, package, replace)
     names = catalog.step_names([s.behavior for s in body.steps])
     steps = [(n, catalog.ref(s.behavior, pkg_qn), s.values) for n, s in zip(names, body.steps)]
     try:
-        block = catalog.mission_text(body.name, catalog.ref(mtype["qualifiedName"], pkg_qn), steps, body.doc)
+        block = catalog.mission_text(body.name, catalog.ref(mtype["qualifiedName"], pkg_qn), steps, body.doc, reqs, catalog.declared_ids(mtype["requirementUsages"]))
         source = apply(block)
     except catalog.CatalogError as exc:
         raise HTTPException(422, str(exc)) from exc
@@ -969,7 +1034,10 @@ class _Flights:
 
     SCRATCH = "MissionCheck__"
 
-    def __init__(self, cat: dict[str, Any], mtype: dict[str, Any], draft: list[StepIn] | None, only: str | None = None):
+    def __init__(
+        self, cat: dict[str, Any], mtype: dict[str, Any], draft: list[StepIn] | None, only: str | None = None,
+        draft_requirements: dict[str, str] | None = None,
+    ):
         self.cat = cat
         comps = {c["qualifiedName"]: c for c in cat["components"]}
         ancestors: dict[str, set[str]] = {}
@@ -980,7 +1048,7 @@ class _Flights:
             return ancestors[qn]
 
         missions = {
-            m["qualifiedName"]: (m["qualifiedName"], m["steps"])
+            m["qualifiedName"]: (m["qualifiedName"], m["steps"], m["requirementUsages"])
             for m in cat["missions"]
             if m["missionType"] == mtype["qualifiedName"] and (only is None or m["qualifiedName"] == only)
         }
@@ -989,12 +1057,22 @@ class _Flights:
             _check_steps(cat, draft)
             names = catalog.step_names([s.behavior for s in draft])
             draft_steps = [(n, s.behavior, s.values) for n, s in zip(names, draft)]
-            self.lines += [f"    {l}" for l in catalog.mission_text("draft", mtype["qualifiedName"], draft_steps)]
-            missions["draft"] = (f"{self.SCRATCH}::draft", [{"name": n, "behavior": b} for n, b, _ in draft_steps])
+            given = {k: v for k, v in (draft_requirements or {}).items() if (v or "").strip()}
+            try:
+                text = catalog.mission_text(
+                    "draft", mtype["qualifiedName"], draft_steps, requirements=given, requirement_ids=catalog.declared_ids(mtype["requirementUsages"]),
+                )
+            except catalog.CatalogError as exc:
+                raise HTTPException(422, str(exc)) from exc
+            self.lines += [f"    {l}" for l in text]
+            missions["draft"] = (
+                f"{self.SCRATCH}::draft", [{"name": n, "behavior": b} for n, b, _ in draft_steps],
+                catalog.apply_values(mtype["requirementUsages"], given),
+            )
         self.archs = {a["id"]: a for a in cat["architectures"]}
         self.flights: dict[str, dict[str, dict[str, Any]]] = {}
         n = 0
-        for key, (mission_qn, steps) in missions.items():
+        for key, (mission_qn, steps, _) in missions.items():
             self.flights[key] = {}
             for cfg in cat["configurations"]:
                 arch = self.archs[cfg["architectureId"]]
@@ -1013,6 +1091,22 @@ class _Flights:
                         self.lines.append("    " + catalog.flown_step(f"f{n}", f"{cfg['qualifiedName']}.{slot['name']}", f"{mission_qn}.{s['name']}"))
                         flown.append({"name": s["name"], "behavior": s["behavior"], "performedBy": cfg["behaviors"][slot["name"]], "var": var})
                 self.flights[key][cfg["qualifiedName"]] = {"problems": sorted(problems), "steps": [] if problems else flown}
+        # the mission's own requirement usages (values set by each mission): each
+        # is checked through a def that binds them (see catalog.check_def_text)
+        self.usage_checks: dict[str, list[dict[str, Any]]] = {}
+        q = 0
+        for key, (mission_qn, _, usages) in missions.items():
+            checks = []
+            for u in catalog.walk_usages(usages):
+                if not u["def"]:
+                    continue
+                entry = {"key": f"{mtype['qualifiedName']}.{u['path']}", "usage": u, "call": None}
+                if not u["missing"]:
+                    q += 1
+                    self.lines.append("    " + catalog.check_def_text(f"q{q}", u["def"], f"{mission_qn}.{u['path']}", u["bound"]))
+                    entry["call"] = f"{self.SCRATCH}::q{q}"
+                checks.append(entry)
+            self.usage_checks[key] = checks
 
     def evaluate(self, project_id: uuid.UUID, exprs: list[str]) -> tuple[dict[str, str | None], list[str]]:
         """Evaluate expressions with the project's models and the scratch package."""
@@ -1026,14 +1120,34 @@ class _Flights:
         return got, run.get("errors") or []
 
 
-def _mission_checks(cat: dict[str, Any], arch: dict[str, Any], totals: list[str]) -> list[dict[str, Any]]:
+def _mission_checks(
+    cat: dict[str, Any], arch: dict[str, Any], totals: list[str], usage_checks: list[dict[str, Any]] = (),
+) -> list[dict[str, Any]]:
     """How each mission requirement of an architecture is checked: by the mission
     simulation that verifies it, when one applies to the architecture and its
     out parameters supply every parameter of the requirement; else by the
-    mission totals, when its parameters are all totals; else not at all."""
+    mission totals, when its parameters are all totals; else not at all.
+    The mission's own requirement usages (``usage_checks``) are checked the same
+    way, a simulation verifying the usage or its def; one with values missing
+    gets the method ``missing``."""
     reqs = {r["qualifiedName"]: r for r in cat["requirements"]}
     sims = {s["qualifiedName"]: s for s in cat["simulations"]}
     out = []
+    for uc in usage_checks:
+        u = uc["usage"]
+        params = u["params"]
+        base = {
+            "requirement": uc["key"], "params": params, "call": uc["call"], "subject": u["subject"],
+            "def": u["def"], "limits": {t["name"]: t["value"] for t in u["thresholds"]}, "missing": u["missing"],
+        }
+        targets = set(u["defLineage"]) | set(u["declarations"])
+        sim = next((q for q in arch["simulations"] if targets & set(sims[q]["verifies"]) and set(params) <= set(sims[q]["outputs"])), None)
+        if not uc["call"]:
+            out.append({**base, "method": "missing", "by": sim})
+        elif sim:
+            out.append({**base, "method": "simulation", "by": sim})
+        elif set(params) <= set(totals):
+            out.append({**base, "method": "evaluation", "by": None})
     for rq in arch["missionRequirements"]:
         params = reqs[rq]["params"]
         sim = next((q for q in arch["simulations"] if rq in sims[q]["verifies"] and set(params) <= set(sims[q]["outputs"])), None)
@@ -1051,6 +1165,7 @@ def _literal(x: float) -> str:
 def _run_missions(
     project_id: uuid.UUID, cat: dict[str, Any], mtype: dict[str, Any], draft: list[StepIn] | None,
     only: str | None = None, systems: list[str] | None = None, simulate: str | bool = False,
+    draft_requirements: dict[str, str] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], list[str], str]:
     """Fly missions with every system instance and check the mission requirements.
 
@@ -1063,7 +1178,7 @@ def _run_missions(
     second evaluate run checks the requirements they verify with their results.
     Returns ``(results[mission key][system qn], errors, run id)``."""
     totals = [t["name"] for t in mtype["totals"]]
-    fl = _Flights(cat, mtype, draft, only)
+    fl = _Flights(cat, mtype, draft, only, draft_requirements)
     sims = {s["qualifiedName"]: s for s in cat["simulations"]}
     comps = {c["qualifiedName"]: c for c in cat["components"]}
     cfgs = {c["qualifiedName"]: c for c in cat["configurations"]}
@@ -1071,9 +1186,13 @@ def _run_missions(
     exprs: list[str] = []
     plans: dict[tuple[str, str], dict[str, Any]] = {}
 
-    def static_expr(rq: str, cfg_qn: str, params: list[str], steps: list[dict[str, Any]]) -> str:
-        args = [" + ".join(f"{s['var']}.{p}" for s in steps) or "0" for p in params]
-        return f"{rq}({', '.join([cfg_qn, *args])})"
+    def call_expr(c: dict[str, Any], cfg_qn: str, args: list[str]) -> str:
+        """The requirement def (or a usage's check def) applied to the system and its parameters."""
+        subject = [cfg_qn] if c.get("subject", True) else []
+        return f"{c.get('call') or c['requirement']}({', '.join([*subject, *args])})"
+
+    def static_expr(c: dict[str, Any], cfg_qn: str, steps: list[dict[str, Any]]) -> str:
+        return call_expr(c, cfg_qn, [" + ".join(f"{s['var']}.{p}" for s in steps) or "0" for p in c["params"]])
 
     for key, per_cfg in fl.flights.items():
         out[key] = {}
@@ -1081,17 +1200,24 @@ def _run_missions(
             if systems is not None and cfg_qn not in systems:
                 continue
             arch = fl.archs[cfgs[cfg_qn]["architectureId"]]
-            checks = _mission_checks(cat, arch, totals)
+            checks = _mission_checks(cat, arch, totals, fl.usage_checks.get(key, []))
             res: dict[str, Any] = {
                 "problems": f["problems"], "steps": [], "totals": {}, "verdicts": {},
-                "verification": {c["requirement"]: {"method": c["method"], "by": c["by"]} for c in checks},
+                "verification": {
+                    c["requirement"]: {"method": c["method"], "by": c["by"], **({"def": c["def"], "limits": c["limits"]} if c.get("def") else {})}
+                    for c in checks
+                },
                 "checks": checks, "simulations": {},
             }
+            for c in checks:
+                if c["method"] == "missing":
+                    res["verdicts"][c["requirement"]] = "error"
+                    res["verification"][c["requirement"]] |= {"method": "evaluation", "note": f"requirement values missing: {', '.join(c['missing'])}"}
             out[key][cfg_qn] = res
             if f["problems"]:
                 continue
             exprs += [f"{s['var']}.{t}" for s in f["steps"] for t in totals]
-            exprs += [static_expr(c["requirement"], cfg_qn, c["params"], f["steps"]) for c in checks if c["method"] == "evaluation"]
+            exprs += [static_expr(c, cfg_qn, f["steps"]) for c in checks if c["method"] == "evaluation"]
             needed = list(dict.fromkeys(c["by"] for c in checks if c["method"] == "simulation"))
             if simulate is True and arch["simulations"] and arch["simulations"][0] not in needed:
                 needed.append(arch["simulations"][0])
@@ -1128,7 +1254,7 @@ def _run_missions(
             res["totals"] = {t: None if None in v else sum(v) for t, v in vals.items()}
             for c in res["checks"]:
                 if c["method"] == "evaluation":
-                    v = got.get(static_expr(c["requirement"], cfg_qn, c["params"], f["steps"]))
+                    v = got.get(static_expr(c, cfg_qn, f["steps"]))
                     res["verdicts"][c["requirement"]] = "holds" if v == "true" else "fails" if v == "false" else "error"
                     res["verification"][c["requirement"]]["values"] = {p: res["totals"].get(p) for p in c["params"]}
 
@@ -1194,7 +1320,7 @@ def _run_missions(
                     res["verdicts"][c["requirement"]] = "error"
                     continue
                 res["verification"][c["requirement"]]["values"] = dict(zip(c["params"], vals))
-                expr = f"{c['requirement']}({', '.join([cfg_qn, *(_literal(x) for x in vals)])})"
+                expr = call_expr(c, cfg_qn, [_literal(x) for x in vals])
                 pending.append((res, c["requirement"], expr))
     if pending:
         got2, errors2 = fl.evaluate(project_id, [e for _, _, e in pending])
@@ -1217,7 +1343,7 @@ def evaluate_missions(project_id: uuid.UUID, body: MissionCheckIn) -> dict[str, 
     verified; the simulation summary leaves out its timeline and steps."""
     cat, _ = _project_catalog(project_id)
     mtype = _find(cat["missionTypes"], body.missionType, "mission type")
-    out, errors, run_id = _run_missions(project_id, cat, mtype, body.draft)
+    out, errors, run_id = _run_missions(project_id, cat, mtype, body.draft, draft_requirements=body.draftRequirements)
     for per_cfg in out.values():
         for res in per_cfg.values():
             for sim in res["simulations"].values():
@@ -1239,13 +1365,20 @@ class SimulateIn(BaseModel):
     simulation: str | None = Field(None, description="qualified name of the simulation def (default: the first that applies to each system)")
     mission: str | None = Field(None, description="qualified name of a saved mission; omit to simulate the draft")
     draft: list[StepIn] | None = None
+    draftRequirements: dict[str, str] | None = None
     systems: list[str] | None = Field(None, description="system instances to simulate (default: every one a simulation applies to)")
 
 
 def _value(v: str | None) -> Any:
-    """An evaluated value as JSON: booleans, numbers, else the text."""
+    """An evaluated value as JSON: booleans, numbers, sequences ([0.15,0.25]),
+    strings ("NACA 4412", without the quotes), else the text."""
     if v in ("true", "false"):
         return v == "true"
+    if v and v[0] in '["':
+        try:
+            return json.loads(v)
+        except ValueError:
+            pass
     n = _number(v)
     return v if n is None else n
 
@@ -1269,6 +1402,7 @@ def simulate_mission(project_id: uuid.UUID, body: SimulateIn) -> dict[str, Any]:
         _find(cat["simulations"], body.simulation, "simulation")
     out, errors, run_id = _run_missions(
         project_id, cat, mtype, body.draft, only=body.mission or "", systems=body.systems, simulate=body.simulation or True,
+        draft_requirements=body.draftRequirements,
     )
     key = body.mission or "draft"
     systems = {}
@@ -1290,6 +1424,310 @@ def _first_simulation(cat: dict[str, Any], cfg_qn: str) -> str | None:
     cfg = next((c for c in cat["configurations"] if c["qualifiedName"] == cfg_qn), None)
     arch = next((a for a in cat["architectures"] if cfg and a["id"] == cfg["architectureId"]), None)
     return arch["simulations"][0] if arch and arch["simulations"] else None
+
+
+# ------------------------------------------------------------------ requirement hierarchy of a system instance
+class RequirementCheckIn(BaseModel):
+    system: str = Field(description="qualified name of the system instance")
+    missions: bool = Field(True, description="also fly every mission (simulations included) to check the mission requirements")
+
+
+def _test_refs(tests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{k: t[k] for k in ("qualifiedName", "name", "method", "toolName", "modelId", "loc")} for t in tests]
+
+
+REQ_SCRATCH = "RequirementCheck__"
+
+
+def _requirement_tree(cat: dict[str, Any], system: str) -> tuple[dict[str, Any], list[tuple[dict[str, Any], str | None]], list[str]]:
+    """The requirements of a system instance in their hierarchy:
+
+    * **system**: the requirement defs that apply to its architecture (by subject
+      type), and the architecture's requirement usages with the values the system
+      instance gives them;
+    * **components**: for each slot, the requirement usages of the component
+      instance that fills it;
+    * **behaviors**: for each behavior slot, those of the behavior instance it performs;
+    * **missions**: for each mission, the mission requirements of the architecture
+      and the mission's own requirement usages, checked as this system flies it.
+
+    Every requirement node carries its def, text, constraints, values (thresholds),
+    nested requirements and the tests that verify it. Also returns, for the
+    nodes checked by evaluation, (node, check expression or None when values are
+    missing or it takes parameters), and the scratch package's check defs."""
+    cfg = _find(cat["configurations"], system, "system instance")
+    arch = next(a for a in cat["architectures"] if a["id"] == cfg["architectureId"])
+    reqs = {r["qualifiedName"]: r for r in cat["requirements"]}
+    inst_by_qn = {i["qualifiedName"]: i for i in cat["instances"]}
+    comps = {c["qualifiedName"]: c for c in cat["components"]}
+    tests = cat["tests"]
+    checks: list[tuple[dict[str, Any], str | None]] = []
+    scratch: list[str] = []
+
+    def def_node(r: dict[str, Any], key: str, context_ids: list[str], origin: str, check_key: str | None = None) -> dict[str, Any]:
+        return {
+            "kind": "requirement", "key": key, "checkKey": check_key, "name": r["name"], "shortId": r["shortId"], "path": None,
+            "def": r["qualifiedName"], "defName": r["name"], "defShortId": r["shortId"],
+            "doc": r["doc"], "constraints": r["constraints"], "thresholds": r["thresholds"], "params": r["params"], "missing": [],
+            "origin": origin, "modelId": r["modelId"], "loc": r["loc"],
+            "tests": _test_refs(catalog.verifying_tests(tests, r["lineage"], [], context_ids)),
+            "verdict": None, "children": [],
+        }
+
+    def usage_node(
+        u: dict[str, Any], key: str, context_ids: list[str], chain: str | None, subject: str | None, origin: str, check_prefix: str | None = None,
+        parent_tests: list[dict[str, Any]] = (), parent: str | None = None,
+    ) -> dict[str, Any]:
+        """``chain`` reaches the usage's owner for an evaluation check; mission
+        usages are checked by flying the mission instead, under ``check_prefix.path``.
+        A nested requirement is also verified by the tests of its parent (``via``)."""
+        own_tests = _test_refs(catalog.verifying_tests(tests, u["defLineage"], u["declarations"], context_ids))
+        names = {t["qualifiedName"] for t in own_tests}
+        node_tests = own_tests + [{**t, "via": t.get("via") or parent} for t in parent_tests if t["qualifiedName"] not in names]
+        node = {
+            "kind": "requirement", "key": key, "checkKey": check_prefix and f"{check_prefix}.{u['path']}", "name": u["name"], "shortId": u["shortId"],
+            "path": u["path"], "def": u["def"], "defName": u["defName"], "defShortId": u["defShortId"],
+            "doc": u["doc"], "constraints": u["constraints"], "thresholds": u["thresholds"], "params": u["params"],
+            "missing": u["missing"], "origin": origin, "modelId": u["modelId"], "loc": u["loc"],
+            "tests": node_tests,
+            "verdict": None,
+            "children": [usage_node(c, f"{key}.{c['name']}", context_ids, chain, subject, origin, check_prefix, node_tests, u["name"]) for c in u["children"]],
+        }
+        if chain is not None and u["def"]:
+            if u["missing"] or u["params"]:
+                checks.append((node, None))
+            else:
+                name = f"r{len(scratch) + 1}"
+                scratch.append(catalog.check_def_text(name, u["def"], f"{chain}.{u['path']}", u["bound"]))
+                checks.append((node, f"{REQ_SCRATCH}::{name}({subject if u['subject'] else ''})"))
+        return node
+
+    def element(kind: str, key: str, label: str, item: dict[str, Any] | None, type_qn: str | None, children: list[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "kind": kind, "key": key, "name": label, "element": item and item["qualifiedName"], "type": type_qn,
+            "modelId": item and item["modelId"], "loc": item and item["loc"], "children": children,
+        }
+
+    # the system itself
+    sys_children = []
+    for rq in arch["requirements"]:
+        n = def_node(reqs[rq], f"sys:{rq}", arch["lineageIds"], f"applies to {reqs[rq]['subjectType']}")
+        sys_children.append(n)
+        checks.append((n, f"{rq}({cfg['qualifiedName']})"))
+    for u in cfg["requirementUsages"]:
+        sys_children.append(usage_node(u, f"sys.{u['path']}", arch["lineageIds"], cfg["qualifiedName"], cfg["qualifiedName"], f"declared in {u['declaredIn']}"))
+
+    # component instances in the slots
+    components = []
+    for slot in arch["slots"]:
+        inst = inst_by_qn.get(cfg["assignments"].get(slot["name"]) or "")
+        comp = comps.get(inst["component"]) if inst else None
+        kids = [
+            usage_node(u, f"slot:{slot['name']}.{u['path']}", comp["lineageIds"], inst["qualifiedName"], inst["qualifiedName"], f"declared in {u['declaredIn']}")
+            for u in inst["requirementUsages"]
+        ] if inst and comp else []
+        node = element("component", f"slot:{slot['name']}", slot["name"], inst, slot["type"], kids)
+        node["multiplicity"] = slot["multiplicity"]
+        components.append(node)
+
+    # behavior instances it performs (checked in the system: their subject is the performed behavior)
+    behaviors = []
+    for b in arch["behaviors"]:
+        inst = inst_by_qn.get(cfg["behaviors"].get(b["name"]) or "")
+        comp = comps.get(inst["component"]) if inst else None
+        chain = f"{cfg['qualifiedName']}.{b['name']}"
+        kids = [
+            usage_node(u, f"perform:{b['name']}.{u['path']}", comp["lineageIds"], chain, chain, f"declared in {u['declaredIn']}")
+            for u in inst["requirementUsages"]
+        ] if inst and comp else []
+        behaviors.append(element("behavior", f"perform:{b['name']}", b["name"], inst, b["type"], kids))
+
+    # missions: the architecture's mission requirements and each mission's own usages
+    missions = []
+    if arch["behaviors"]:
+        for m in cat["missions"]:
+            mtype = next((t for t in cat["missionTypes"] if t["id"] == m["missionTypeId"]), None)
+            kids = [
+                def_node(reqs[rq], f"mission:{m['qualifiedName']}/{rq}", arch["lineageIds"], f"applies to {reqs[rq]['subjectType']}", rq)
+                for rq in arch["missionRequirements"]
+            ]
+            kids += [
+                usage_node(u, f"mission:{m['qualifiedName']}/{u['path']}", arch["lineageIds"], None, None, f"declared in {u['declaredIn']}", mtype and mtype["qualifiedName"])
+                for u in m["requirementUsages"]
+            ]
+            node = element("mission", f"mission:{m['qualifiedName']}", m["name"], m, m["missionType"], kids)
+            missions.append(node)
+
+    root = {
+        "kind": "system", "key": "system", "name": cfg["name"], "element": cfg["qualifiedName"], "type": arch["qualifiedName"],
+        "modelId": cfg["modelId"], "loc": cfg["loc"],
+        "children": [
+            {"kind": "group", "key": "g:system", "name": "System", "children": sys_children},
+            {"kind": "group", "key": "g:components", "name": "Components", "children": components},
+            {"kind": "group", "key": "g:behaviors", "name": "Behaviors", "children": behaviors},
+            {"kind": "group", "key": "g:missions", "name": "Missions", "children": missions},
+        ],
+    }
+    return root, checks, scratch
+
+
+def _verdict(v: str | None) -> str:
+    return "holds" if v == "true" else "fails" if v == "false" else "error"
+
+
+@app.get("/projects/{project_id}/catalog/requirement-tree")
+def requirement_tree(project_id: uuid.UUID, system: str) -> dict[str, Any]:
+    """The requirements of a system instance in their hierarchy (see
+    ``_requirement_tree``), without verdicts."""
+    cat, _ = _project_catalog(project_id)
+    root, _, _ = _requirement_tree(cat, system)
+    _rollup(root)
+    return {"system": system, "tree": root, "tests": _test_refs(cat["tests"])}
+
+
+@app.post("/projects/{project_id}/catalog/requirement-tree/check")
+def check_requirement_tree(project_id: uuid.UUID, body: RequirementCheckIn) -> dict[str, Any]:
+    """Check every requirement of a system instance's hierarchy. System, component
+    and behavior requirements are evaluated against the model in one run (each
+    usage through a def that binds the values its instance gives it); mission
+    requirements are checked by flying each mission, with the simulations that
+    verify them. Each requirement node gets ``verdict`` (holds, fails, error,
+    missing: values still unset) and ``verifiedBy`` (how it was checked)."""
+    cat, _ = _project_catalog(project_id)
+    root, checks, scratch = _requirement_tree(cat, body.system)
+    errors: list[str] = []
+    exprs = [e for _, e in checks if e]
+    if exprs:
+        rows = _project_heads(project_id)
+        files = [{"name": f"{r['name']}.sysml", "text": r["source"]} for r in rows]
+        files.append({"name": f"{REQ_SCRATCH}.sysml", "text": "\n".join([f"package {REQ_SCRATCH} {{", *(f"    {l}" for l in scratch), "}"]) + "\n"})
+        run = _interpreter("/execute", {"files": files, "kind": "evaluate", "expression": "\n".join(dict.fromkeys(exprs)), "trace": False})
+        got = {c["subject"]: (c["values"][0]["value"] if c["values"] else None) for c in run.get("checks") or []}
+        errors += run.get("errors") or []
+    else:
+        got = {}
+    for node, expr in checks:
+        if node["missing"]:
+            node["verdict"], node["verifiedBy"] = "missing", {"method": "analysis", "note": f"set {', '.join(node['missing'])}"}
+        elif expr is None:
+            node["verdict"], node["verifiedBy"] = None, {"method": "mission", "note": "its parameters come from a mission: checked under Missions"}
+        else:
+            by = next((t["qualifiedName"] for t in node["tests"] if t["method"] == "analysis"), None)
+            node["verdict"], node["verifiedBy"] = _verdict(got.get(expr)), {"method": "analysis", "by": by}
+
+    run_id = None
+    if body.missions:
+        group = next(g for g in root["children"] if g["key"] == "g:missions")
+        by_mission = {m["element"]: m for m in group["children"]}
+        for mtype in cat["missionTypes"]:
+            if not any(cat_m["missionType"] == mtype["qualifiedName"] for cat_m in cat["missions"]):
+                continue
+            out, errs, run_id = _run_missions(project_id, cat, mtype, None, systems=[body.system])
+            errors += errs
+            for m_qn, per_cfg in out.items():
+                res = per_cfg.get(body.system)
+                node = by_mission.get(m_qn)
+                if not node or not res:
+                    continue
+                node["problems"] = res["problems"]
+                node["totals"] = res["totals"]
+                for k in node["children"]:
+                    for r in [k, *_descendants(k)]:
+                        rq = r.get("checkKey")
+                        if res["problems"]:
+                            r["verdict"], r["verifiedBy"] = "cannot fly", {"method": "mission", "note": "; ".join(res["problems"])}
+                        elif rq in res["verdicts"]:
+                            ver = res["verification"].get(rq) or {}
+                            r["verdict"] = res["verdicts"][rq]
+                            r["verifiedBy"] = {"method": ver.get("method"), "by": ver.get("by"), "values": ver.get("values"), "note": ver.get("note")}
+                        elif r["missing"]:
+                            r["verdict"], r["verifiedBy"] = "missing", {"method": "mission", "note": f"set {', '.join(r['missing'])}"}
+                        else:
+                            r["verdict"], r["verifiedBy"] = None, {"method": None, "note": "no simulation or mission total supplies its parameters"}
+    _rollup(root)
+    return {"system": body.system, "tree": root, "tests": _test_refs(cat["tests"]), "errors": errors, "runId": run_id}
+
+
+_SEVERITY = ("fails", "cannot fly", "error", "missing", "holds")
+
+
+def _rollup(n: dict[str, Any]) -> str | None:
+    """A node's verdict with its children's: the worst of them (fails, cannot fly,
+    error, missing, holds); None when nothing below it was checked."""
+    found = [_rollup(c) for c in n.get("children") or []]
+    if n["kind"] == "requirement":
+        found.append(n.get("verdict"))
+    n["rollup"] = next((v for v in _SEVERITY if v in found), None)
+    return n["rollup"]
+
+
+def _descendants(n: dict[str, Any]):
+    for c in n.get("children") or []:
+        yield c
+        yield from _descendants(c)
+
+
+# ------------------------------------------------------------------ component analyses
+class ComponentAnalysisIn(BaseModel):
+    instance: str = Field(description="qualified name of the catalog instance to analyse")
+    analysis: str | None = Field(None, description="qualified name of the analysis def (default: the first that applies)")
+
+
+@app.post("/projects/{project_id}/catalog/components/analyze")
+def analyze_component(project_id: uuid.UUID, body: ComponentAnalysisIn) -> dict[str, Any]:
+    """Run a component analysis (a tool-bound def whose subject is a component)
+    for one catalog instance: its in parameters are evaluated with the instance as
+    subject, and the analysis is called through the analysis service, which logs
+    the call under the returned run id. ``current`` holds the instance's values of
+    the outputs named like one of its component's attributes: those can be
+    written back by saving the instance with the new values."""
+    cat, _ = _project_catalog(project_id)
+    inst = _find(cat["instances"], body.instance, "instance")
+    comp = next(c for c in cat["components"] if c["id"] == inst["componentId"])
+    if not comp["analyses"]:
+        raise HTTPException(422, f"no analysis applies to a {comp['name']}")
+    if body.analysis and body.analysis not in comp["analyses"]:
+        raise HTTPException(422, f"{short_name(body.analysis)} does not apply to a {comp['name']}")
+    a = _find(cat["componentAnalyses"], body.analysis or comp["analyses"][0], "analysis")
+    subject = re.compile(rf"(?<![\w:.]){re.escape(a['subject'])}\b")
+    exprs = {i["name"]: subject.sub(inst["qualifiedName"], i["value"]) for i in a["inputs"]}
+    got: dict[str, str | None] = {}
+    errors: list[str] = []
+    if exprs:
+        rows = _project_heads(project_id)
+        files = [{"name": f"{r['name']}.sysml", "text": r["source"]} for r in rows]
+        run = _interpreter("/execute", {"files": files, "kind": "evaluate", "expression": "\n".join(dict.fromkeys(exprs.values())), "trace": False})
+        got = {c["subject"]: (c["values"][0]["value"] if c["values"] else None) for c in run.get("checks") or []}
+        errors = run.get("errors") or []
+    inputs = {name: _value(got.get(expr)) for name, expr in exprs.items()}
+    missing = [n for n, v in inputs.items() if v is None or v == "<undetermined>"]
+    if missing:
+        raise HTTPException(422, f"{inst['name']} gives no value for {', '.join(missing)}" + (f": {errors[0]}" if errors else ""))
+    run_id = str(uuid.uuid4())
+    try:
+        r = httpx.post(
+            f"{ANALYSIS_URL}/analyses/{a['toolName']}/invoke",
+            json={"toolName": a["toolName"], "uri": f"analysis://{a['toolName']}", "inputs": inputs, "runId": run_id},
+            timeout=180,
+        )
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"analysis service unreachable: {exc}") from exc
+    if r.status_code >= 400:
+        try:
+            detail = r.json().get("detail")
+        except ValueError:
+            detail = r.text[:300]
+        raise HTTPException(r.status_code if r.status_code < 500 else 502, f"{a['toolName']}: {detail}")
+    outs = r.json().get("outputs") or {}
+    outputs = {k: (v.get("value") if isinstance(v, dict) and "value" in v else v) for k, v in outs.items()}
+    attrs = {x["name"] for x in comp["attributes"]}
+    return {
+        "instance": inst["qualifiedName"], "component": comp["qualifiedName"], "analysis": a["qualifiedName"], "toolName": a["toolName"],
+        "runId": run_id, "inputs": inputs, "outputs": outputs,
+        "units": {k: v["unit"] for k, v in outs.items() if isinstance(v, dict) and v.get("unit")},
+        # outputs that are attributes of the component: the instance's values now
+        "current": {k: inst["values"].get(k) for k in outputs if k in attrs},
+    }
 
 
 @app.delete("/projects/{project_id}/catalog/elements")

@@ -64,6 +64,12 @@ services:
     ports:
       - "8011:8011"
 
+  # Propeller aerodynamics: XFOIL section polars + blade-element momentum, registered as kind=external (propellerAero)
+  aero:
+    build: ./services/aero
+    ports:
+      - "8012:8012"
+
   # 3-D geometry (glTF) of system instances, generated from the project's catalog
   geometry:
     build: ./services/geometry

@@ -23,7 +23,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from .gltf import Material, Mesh, Scene, box, cylinder, hex_color, merge
+from .gltf import Material, Mesh, Scene, Vec, add, box, cross, cylinder, hex_color, merge, norm, scale
 
 _NUM = re.compile(r"-?\d+(?:\.\d*)?(?:[eE][-+]?\d+)?")
 MAX_COPIES = 12  # elements drawn for a slot with an open multiplicity
@@ -36,6 +36,37 @@ class GeometryError(ValueError):
 def number(values: dict[str, str], name: str, default: float | None = None) -> float | None:
     m = _NUM.search(values.get(name) or "")
     return float(m.group(0)) if m else default
+
+
+def sequence(values: dict[str, str], name: str) -> list[float]:
+    """A sequence attribute, written ``(0.15, 0.25, …)``, as numbers ([] if absent)."""
+    return [float(x) for x in _NUM.findall(values.get(name) or "")]
+
+
+def blade_surface(center: Vec, yaw: float, radius: float, stations: list[float], chord: list[float], twist: list[float], hub: float) -> Mesh:
+    """One blade as a twisted surface through its stations (r/R, chord/R, twist in
+    degrees), along the direction ``yaw`` in the rotor plane: the chord line is
+    pitched up towards the leading edge, the pitch axis at quarter chord."""
+    span = (math.cos(yaw), 0.0, math.sin(yaw))
+    ahead = (-math.sin(yaw), 0.0, math.cos(yaw))  # the way the blade moves
+    up = (0.0, 1.0, 0.0)
+    rows = list(zip(stations, chord, twist))
+    if hub < stations[0]:
+        rows.insert(0, (hub, chord[0], twist[0]))
+    m = Mesh()
+    prev: tuple[int, int] | None = None
+    for r_rel, c_rel, tw in rows:
+        b = math.radians(tw)
+        c = c_rel * radius
+        d = add(scale(ahead, math.cos(b)), scale(up, math.sin(b)))  # trailing to leading edge
+        p = add(center, scale(span, r_rel * radius))
+        n = norm(cross(d, span))
+        le = m.vertex(add(p, scale(d, 0.25 * c)), n)
+        te = m.vertex(add(p, scale(d, -0.75 * c)), n)
+        if prev:
+            m.indices += [prev[0], prev[1], te, prev[0], te, le]
+        prev = (le, te)
+    return m
 
 
 def copies(multiplicity: str | None) -> int:
@@ -143,9 +174,14 @@ def multirotor(roles: dict[str, SlotFill | None], others: list[SlotFill]) -> Res
     radius = wheelbase / 2
     prop_d = number(prop.values, "diameter", 10) * 0.0254  # m
     motor_m = number(motor.values, "mass", 0.15)
-    hub_r = max(0.06, 0.16 * wheelbase)
+    # the frame's structural geometry when it gives one (mm), else proportions of the wheelbase
+    hub_r = (number(frame.values, "hubDiameter") or 0) / 2000 or max(0.06, 0.16 * wheelbase)
     hub_h = max(0.02, 0.04 * wheelbase)
-    arm_r = max(0.007, 0.018 * wheelbase)
+    arm_r = (number(frame.values, "armOuterDiameter") or 0) / 2000 or max(0.007, 0.018 * wheelbase)
+    # the propeller's blades when it gives their stations
+    blade = (sequence(prop.values, "stations"), sequence(prop.values, "chord"), sequence(prop.values, "twist"))
+    detailed = len(blade[0]) >= 2 and len(blade[0]) == len(blade[1]) == len(blade[2])
+    blade_count = int(number(prop.values, "bladeCount", 2) or 2)
     motor_r = 0.022 * (motor_m / 0.1) ** (1 / 3)
     motor_h = 1.1 * motor_r
 
@@ -181,8 +217,14 @@ def multirotor(roles: dict[str, SlotFill | None], others: list[SlotFill]) -> Res
         top = hub_y + arm_r + motor_h
         sc.add(f"motors[{i + 1}]", cylinder((x, hub_y + arm_r, z), (x, top, z), motor_r, 24), sc.material("motor", MOTOR), **motor.extras(i))
         y = top + 0.012
-        blade_w = max(0.012, 0.09 * prop_d)
-        blades = box((x, y, z), (prop_d, 0.004, blade_w), yaw=a)  # two blades: one bar through the hub
+        if detailed:
+            blades = merge(*(
+                blade_surface((x, y, z), a + 2 * math.pi * k / blade_count, prop_d / 2, *blade, number(prop.values, "hubRadius", blade[0][0]) or blade[0][0])
+                for k in range(blade_count)
+            ))
+        else:
+            blade_w = max(0.012, 0.09 * prop_d)
+            blades = box((x, y, z), (prop_d, 0.004, blade_w), yaw=a)  # two blades: one bar through the hub
         hubcap = cylinder((x, top, z), (x, y + 0.006, z), max(0.008, 0.25 * motor_r), 16)
         sc.add(f"propellers[{i + 1}]", merge(blades, hubcap), sc.material("prop", PROP), **prop.extras(i))
         sc.add(f"propellers[{i + 1}]/disc", cylinder((x, y - 0.001, z), (x, y + 0.001, z), prop_d / 2, 48), disc_mat, **prop.extras(i))

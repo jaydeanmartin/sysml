@@ -80,12 +80,22 @@ export function requirementSnippet(r: {
   subjectName: string;
   subjectType: string;
   constraint: string;
+  /** a library requirement: abstract, with attributes (thresholds) left for usages and instances to set */
+  abstract?: boolean;
+  /** comma-separated attribute names, e.g. "actual, minimum" */
+  thresholds?: string;
 }): string {
   const id = r.id ? ` <'${r.id}'>` : "";
   const subject = r.subjectType ? `\n        subject ${r.subjectName || "subj"} : ${r.subjectType};` : "";
+  const attrs = (r.thresholds || "")
+    .split(",")
+    .map((t) => t.trim())
+    .filter((t) => /^[A-Za-z_]\w*$/.test(t))
+    .map((t) => `\n        attribute ${t} : Real;`)
+    .join("");
   const constraint = r.constraint ? `\n        require constraint { ${r.constraint} }` : "";
-  return `    requirement def${id} ${r.name} {
-        doc /* ${r.text.replace(/\*\//g, "* /")} */${subject}${constraint}
+  return `    ${r.abstract ? "abstract " : ""}requirement def${id} ${r.name} {
+        doc /* ${r.text.replace(/\*\//g, "* /")} */${subject}${attrs}${constraint}
     }
 `;
 }

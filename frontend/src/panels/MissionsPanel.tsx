@@ -3,6 +3,11 @@ import { api } from "../api";
 import type { CatalogChange, Component, FlownMission, Mission, MissionEvaluation, MissionType, StepRequest, Verification } from "../types";
 import { NAME_RE, errorText, partText, placeholder, ref, short, type CatalogPanelProps } from "./catalogUtil";
 import { MissionSimulation } from "./MissionSimulation";
+import { fillDoc, missingValues, ownValues, ReqId, reqId, RequirementValues, requirementLines, walkUsages } from "./RequirementValues";
+
+/** the draft's values for one requirement usage, by attribute */
+const ownValuesOf = (draft: { requirements: Record<string, string> } | null, path: string) =>
+  Object.fromEntries(Object.entries(draft?.requirements || {}).filter(([k]) => k.slice(0, k.lastIndexOf(".")) === path).map(([k, v]) => [k.slice(k.lastIndexOf(".") + 1), v]));
 
 interface Draft {
   name: string;
@@ -10,6 +15,8 @@ interface Draft {
   package: string;
   /** in order: a behavior (abstract #Behavior action def) and its quantities */
   steps: StepRequest[];
+  /** requirement value ("usage.attribute") -> number */
+  requirements: Record<string, string>;
   /** qualified name of the mission being edited; null for a new one */
   replace: string | null;
 }
@@ -91,13 +98,14 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
     const base = lowerFirst(t.name);
     let n = 1;
     while (catalog?.missions.some((m) => m.name === `${base}${n}`)) n++;
-    return { name: `${base}${n}`, doc: "", package: "", steps: [], replace: null };
+    return { name: `${base}${n}`, doc: "", package: "", steps: [], requirements: {}, replace: null };
   };
   const fromMission = (m: Mission): Draft => ({
     name: m.name,
     doc: m.doc || "",
     package: m.package || "",
     steps: m.steps.filter((s) => s.behavior).map((s) => ({ behavior: s.behavior!, values: { ...s.values } })),
+    requirements: ownValues(m.requirementUsages),
     replace: m.qualifiedName,
   });
 
@@ -145,6 +153,7 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
         doc: draft.doc,
         package: draft.replace ? null : draft.package || null,
         steps: clean(draft.steps),
+        requirements: draft.requirements,
         replace: draft.replace,
       })
     );
@@ -167,8 +176,10 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
   };
 
   const current = draft?.replace ? missions.find((m) => m.qualifiedName === draft.replace) : undefined;
-  const draftKey = draft ? stepsKey(draft.steps) : "";
-  const stepsChanged = !current || draftKey !== stepsKey(fromMission(current).steps);
+  // requirement values change the verdicts as the steps do
+  const draftKey = draft ? stepsKey(draft.steps) + JSON.stringify(draft.requirements) : "";
+  const stepsChanged = !current || draftKey !== stepsKey(fromMission(current).steps) + JSON.stringify(ownValues(current.requirementUsages));
+  const reqMissing = mtype && draft ? missingValues(mtype.requirementUsages, draft.requirements) : [];
   const incomplete = draft ? draft.steps.some((s) => quantities(s.behavior).some((q) => !s.values[q.name]?.trim())) : false;
 
   /** One evaluation: every mission (and the draft, if it is not a saved mission
@@ -179,7 +190,7 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
     setEvaluating(true);
     const sendDraft = stepsChanged && draft.steps.length > 0 && !incomplete;
     try {
-      const res = await api.evaluateMissions(projectId, mtype.qualifiedName, sendDraft ? clean(draft.steps) : null);
+      const res = await api.evaluateMissions(projectId, mtype.qualifiedName, sendDraft ? clean(draft.steps) : null, sendDraft ? draft.requirements : null);
       setEvals((m) => ({ ...m, [mtype.qualifiedName]: { ...res, at: new Date().toLocaleTimeString(), draftKey: sendDraft ? draftKey : null } }));
     } catch (e) {
       setEvals((m) => ({ ...m, [mtype.qualifiedName]: { missionType: mtype.qualifiedName, totals, missions: {}, errors: [errorText(e)], at: new Date().toLocaleTimeString(), draftKey: null } }));
@@ -217,18 +228,22 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
     mtype && draft
       ? partText(
           `action ${draft.name || "…"} : ${ref(mtype.qualifiedName, scope)}`,
-          draft.steps.length
-            ? [
-                "first start;",
-                ...draft.steps.map((s, i) => {
-                  const body = quantities(s.behavior)
-                    .filter((q) => s.values[q.name]?.trim())
-                    .map((q) => `attribute :>> ${q.name} = ${s.values[q.name].trim()};`);
-                  return `then action ${names[i]} : ${ref(s.behavior, scope)}${body.length ? ` { ${body.join(" ")} }` : ";"}`;
-                }),
-                "then done;",
-              ]
-            : [],
+          [
+            ...(draft.steps.length
+              ? [
+                  "first start;",
+                  ...draft.steps.map((s, i) => {
+                    const body = quantities(s.behavior)
+                      .filter((q) => s.values[q.name]?.trim())
+                      .map((q) => `attribute :>> ${q.name} = ${s.values[q.name].trim()};`);
+                    return `then action ${names[i]} : ${ref(s.behavior, scope)}${body.length ? ` { ${body.join(" ")} }` : ";"}`;
+                  }),
+                  "then done;",
+                ]
+              : []),
+            // the mission's requirement values follow its steps
+            ...requirementLines(draft.requirements, mtype.requirementUsages),
+          ],
           draft.doc
         )
       : "";
@@ -244,7 +259,15 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
   const flyerQn = flyer && draftResults?.[flyer] ? flyer : Object.keys(draftResults || {}).find((k) => !draftResults![k].problems.length) || null;
   const flight = flyerQn ? draftResults?.[flyerQn] : undefined;
   const timeTotal = totals[0];
-  const reqDocs = Object.fromEntries(catalog.requirements.map((r) => [r.qualifiedName, r.doc || ""]));
+  const reqIds: Record<string, string | null> = Object.fromEntries([
+    ...catalog.requirements.map((r) => [r.qualifiedName, r.shortId]),
+    ...(mtype ? walkUsages(mtype.requirementUsages).map((u) => [`${mtype.qualifiedName}.${u.path}`, reqId(u)]) : []),
+  ]);
+  const reqDocs = Object.fromEntries([
+    ...catalog.requirements.map((r) => [r.qualifiedName, r.doc || ""]),
+    // the mission type's own requirement usages are checked under "MissionType.usage"
+    ...(mtype ? walkUsages(mtype.requirementUsages).map((u) => [`${mtype.qualifiedName}.${u.path}`, fillDoc(u.doc, { ...u.values, ...ownValuesOf(draft, u.path) })]) : []),
+  ]);
 
   return (
     <div className="panel lib">
@@ -441,13 +464,15 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
                   {!stepTypes.length && <span className="muted small">No behaviors yet: declare #Behavior action defs in the Library tab.</span>}
                 </div>
 
+                <RequirementValues usages={mtype.requirementUsages} values={draft.requirements} what="mission" onChange={(requirements) => setDraft({ ...draft, requirements })} />
                 <code className="block">{preview}</code>
-                {draftResults && <VerificationTable results={draftResults} docs={reqDocs} />}
+                {draftResults && <VerificationTable results={draftResults} docs={reqDocs} ids={reqIds} />}
                 <div className="row-end">
                   {incomplete && <span className="hint">Every step needs all its quantities.</span>}
+                  {reqMissing.length > 0 && <span className="hint">State the requirement values: {reqMissing.join(", ")}.</span>}
                   {!incomplete && !draftResults && draft.steps.length > 0 && <span className="hint">Evaluate to fly it with every system instance.</span>}
                   {draft.replace && changed && <button onClick={() => current && setDraft(fromMission(current))}>Revert</button>}
-                  <button className="primary" disabled={busy || !NAME_RE.test(draft.name) || !changed || incomplete} onClick={save}>
+                  <button className="primary" disabled={busy || !NAME_RE.test(draft.name) || !changed || incomplete || reqMissing.length > 0} onClick={save}>
                     {busy ? "Saving…" : draft.replace ? "Save mission" : "Create mission"}
                   </button>
                 </div>
@@ -460,6 +485,7 @@ export function MissionsPanel({ projectId, catalog, loading, error, dirty, ensur
                 missionType={mtype.qualifiedName}
                 mission={current && !stepsChanged ? current.qualifiedName : null}
                 draft={current && !stepsChanged ? null : clean(draft.steps)}
+                draftRequirements={current && !stepsChanged ? null : draft.requirements}
                 label={current && !stepsChanged ? current.name : "draft"}
                 systems={catalog.configurations}
                 simulations={catalog.simulations}
@@ -557,7 +583,7 @@ function how(v?: Verification): string {
 }
 
 /** each system's verdict on each mission requirement, and how it was verified */
-function VerificationTable({ results, docs }: { results: Record<string, FlownMission>; docs: Record<string, string> }) {
+function VerificationTable({ results, docs, ids }: { results: Record<string, FlownMission>; docs: Record<string, string>; ids: Record<string, string | null> }) {
   const reqs = [...new Set(Object.values(results).flatMap((r) => Object.keys(r.verification || {})))];
   if (!reqs.length) return null;
   const method = (q: string) => Object.values(results).find((r) => r.verification?.[q])?.verification[q];
@@ -571,6 +597,7 @@ function VerificationTable({ results, docs }: { results: Record<string, FlownMis
               const m = method(q);
               return (
                 <th key={q} title={docs[q]}>
+                  <ReqId id={ids[q]} />
                   {short(q)}
                   <div className="muted small">{m?.method === "simulation" ? `◆ simulated · ${short(m.by)}` : "○ estimated · mission totals"}</div>
                 </th>

@@ -19,11 +19,13 @@ import { LibraryPanel } from "./panels/LibraryPanel";
 import { MissionsPanel } from "./panels/MissionsPanel";
 import { GeometryPanel } from "./panels/GeometryPanel";
 import { RequirementsPanel } from "./panels/RequirementsPanel";
+import { RequirementTreePanel } from "./panels/RequirementTreePanel";
 import { SNIPPETS } from "./snippets";
+import { ThemeSwitch } from "./theme";
 import type { Catalog, CatalogChange, Diagnostic, GNode, Graph, Loc, Located, Model, ModelSummary, ModelTemplate, Project, Run, RunRequest } from "./types";
 
-type Tab = "diagram" | "library" | "configurator" | "missions" | "geometry" | "requirements" | "execute" | "analyses" | "history";
-const CATALOG_TABS: Tab[] = ["library", "configurator", "missions", "geometry"];
+type Tab = "diagram" | "library" | "configurator" | "missions" | "geometry" | "requirements" | "reqtree" | "execute" | "analyses" | "history";
+const CATALOG_TABS: Tab[] = ["library", "configurator", "missions", "geometry", "reqtree"];
 // [panel, label, icon, tooltip] in sidebar order
 const PANELS: [Tab, string, string, string][] = [
   ["diagram", "Diagram", "◫", "Structure, interconnection, requirement and behavior diagrams"],
@@ -32,6 +34,7 @@ const PANELS: [Tab, string, string, string][] = [
   ["missions", "Missions", "⚑", "Plan missions as ordered behaviors and check them against system instances"],
   ["geometry", "3-D", "◈", "3-D geometry of system instances, generated from their components"],
   ["requirements", "Requirements", "✓", "Requirements, satisfy relations and verdicts"],
+  ["reqtree", "Req. hierarchy", "☷", "Requirements of a system instance in their hierarchy, with the tests that verify them"],
   ["execute", "Execute", "▶", "Run calcs, analyses, actions and state machines"],
   ["analyses", "Analyses", "ƒ", "REST analyses the model can call"],
   ["history", "History", "⟲", "Versions and runs of the model"],
@@ -512,6 +515,7 @@ export default function App() {
         <button className="primary" onClick={save} disabled={!dirty || saving}>
           {saving ? "Saving…" : dirty ? "Save" : `Saved v${saved?.headVersion ?? "–"}`}
         </button>
+        <ThemeSwitch />
       </header>
 
       <div className="workspace">
@@ -623,6 +627,8 @@ export default function App() {
                   <LibraryPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
                 ) : tab === "geometry" ? (
                   <GeometryPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
+                ) : tab === "reqtree" ? (
+                  <RequirementTreePanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} focus={selected ? nodesById.get(selected)?.qualifiedName : null} />
                 ) : tab === "missions" ? (
                   <MissionsPanel projectId={projectId} catalog={catalog} loading={catalogLoading} error={catalogError} dirty={dirty} ensureSaved={ensureSaved} onChange={changeCatalog} onOpen={openElement} />
                 ) : (
